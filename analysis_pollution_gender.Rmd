@@ -865,20 +865,18 @@ cat(sprintf(
 
 ## 8. County Lists Export
 
-Single Excel file with one sheet per map, listing the counties visible in each figure.
+Single Excel file with one sheet per map, listing individual census tracts visible in each figure.
 
-```{r county-lists-export}
-make_sheet <- function(hotspot_fips_vec, tract_data) {
+```{r tract-lists-export}
+make_sheet <- function(hotspot_fips_vec, tract_data, outcome_var) {
   tract_data %>%
     mutate(STATE_COUNTY_FIP = as.character(STATE_COUNTY_FIP)) %>%
     filter(STATE_COUNTY_FIP %in% as.character(hotspot_fips_vec),
            bi_class == "2-2") %>%
-    group_by(STATE_COUNTY_FIP, CountyName, State_fips) %>%
-    summarise(Score_total = mean(Score_total, na.rm = TRUE),
-              .groups = "drop") %>%
-    mutate(county_rank = dense_rank(desc(Score_total))) %>%
-    arrange(county_rank, State_fips, CountyName) %>%
-    select(county_rank, State_fips, CountyName, STATE_COUNTY_FIP, Score_total)
+    mutate(tract_rank = dense_rank(desc(Score_total))) %>%
+    arrange(tract_rank, State_fips, CountyName) %>%
+    select(tract_rank, GEOID, State_fips, CountyName, STATE_COUNTY_FIP,
+           all_of(outcome_var), Score_total)
 }
 
 # Extract hotspot FIPS from two sf threshold layers
@@ -906,16 +904,16 @@ hotspot_fips_bbox <- function(sf_nearby, xmin, xmax, ymin, ymax) {
 inact_with_battery <- inactive_states_20pc[has_battery, ]
 inact_with_solar   <- inactive_states_20pc[has_solar,   ]
 
-sheet1_earnings   <- make_sheet(hotspot_fips(earnings_states_20pc, earnings_states_10pc), earnings_cl)
-sheet2_inactivity <- make_sheet(hotspot_fips(inactive_states_20pc, inactive_states_10pc), inactive)
+sheet1_earnings   <- make_sheet(hotspot_fips(earnings_states_20pc, earnings_states_10pc), earnings_cl, "Female")
+sheet2_inactivity <- make_sheet(hotspot_fips(inactive_states_20pc, inactive_states_10pc), inactive,    "share_Inactive_F")
 
-sheet3_battery_rb <- make_sheet(hotspot_fips_bbox(inact_with_battery, -92.0, -74.5, 36.5, 47.5), inactive)
-sheet4_solar_rb   <- make_sheet(hotspot_fips_bbox(inact_with_solar,   -92.0, -74.5, 36.5, 47.5), inactive)
+sheet3_battery_rb <- make_sheet(hotspot_fips_bbox(inact_with_battery, -92.0, -74.5, 36.5, 47.5), inactive, "share_Inactive_F")
+sheet4_solar_rb   <- make_sheet(hotspot_fips_bbox(inact_with_solar,   -92.0, -74.5, 36.5, 47.5), inactive, "share_Inactive_F")
 
-sheet5_battery_s  <- make_sheet(hotspot_fips_bbox(inact_with_battery, -97.5, -85.5, 28.5, 35.5), inactive)
-sheet6_solar_s    <- make_sheet(hotspot_fips_bbox(inact_with_solar,   -97.5, -85.5, 28.5, 35.5), inactive)
+sheet5_battery_s  <- make_sheet(hotspot_fips_bbox(inact_with_battery, -97.5, -85.5, 28.5, 35.5), inactive, "share_Inactive_F")
+sheet6_solar_s    <- make_sheet(hotspot_fips_bbox(inact_with_solar,   -97.5, -85.5, 28.5, 35.5), inactive, "share_Inactive_F")
 
-sheet7_utah       <- make_sheet(hotspot_fips_bbox(inact_with_battery, -114.1, -109.0, 36.9, 42.0), inactive)
+sheet7_utah       <- make_sheet(hotspot_fips_bbox(inact_with_battery, -114.1, -109.0, 36.9, 42.0), inactive, "share_Inactive_F")
 
 writexl::write_xlsx(
   list(
@@ -929,5 +927,5 @@ writexl::write_xlsx(
   ),
   "out/validation/county_lists_by_map.xlsx"
 )
-cat("County lists exported to out/validation/county_lists_by_map.xlsx\n")
+cat("Tract lists exported to out/validation/county_lists_by_map.xlsx\n")
 ```
