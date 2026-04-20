@@ -1,0 +1,961 @@
+---
+title: "Pollution and Gender Book Chapter: Analyis"
+author: "Charlotte Sophia Bez and Linnea Nelli"
+date: "`r Sys.Date()`"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, message = FALSE, warning = FALSE,
+                      fig.width = 14, fig.height = 8)
+
+setwd("C:\\Users\\charlott\\Dropbox (Personal)\\Book_Chapters\\pollution_gender")
+
+library(readxl)
+library(dplyr)
+library(here)
+library(tidyverse)
+library(janitor)
+library(sp)
+library(sf)
+library(readr)
+library(biscale)
+library(ggplot2)
+library(cowplot)
+library(purrr)
+library(writexl)
+library(lemon)
+library(tidyr)
+```
+
+---
+
+## 1. Inactivity Maps
+
+Counties where **female inactivity** and **RSEI toxicity** are both in the top quintile (20%) or top decile (10%) are classified as bi-variate hotspots (`bi_class = "2-2"`). The loop produces individual threshold maps, which are then combined into a single overlay.
+
+```{r inactivity-data}
+empl_stat  <- read.csv("in/empl_stat.csv")
+county_shp <- read_sf("in/tl_2022_us_county/tl_2022_us_county.shp")
+
+TERRITORIES <- c("60", "66", "69", "72", "78")
+
+county_geom <- county_shp %>%
+  distinct(GEOID, STATEFP, geometry) %>%
+  filter(!(STATEFP %in% TERRITORIES)) %>%
+  arrange(GEOID)
+
+state_shp <- read_sf("in/tl_2022_us_state/tl_2022_us_state.shp")
+states <- state_shp %>%
+  filter(!(STATEFP %in% c("60", "66", "69", "78", "72", "02", "15")))
+```
+
+```{r inactivity-loop}
+for (thresh in list(list(q = 0.80, label = "20pc", pct = "20%"),
+                    list(q = 0.90, label = "10pc", pct = "10%"))) {
+
+  p_inactive <- quantile(empl_stat$share_Inactive_F, thresh$q, na.rm = TRUE)
+  p_tox      <- quantile(empl_stat$Score_total,       thresh$q, na.rm = TRUE)
+
+  inactive <- empl_stat %>%
+    mutate(
+      bi_class = case_when(
+        share_Inactive_F >= p_inactive & Score_total >= p_tox ~ "2-2",
+        share_Inactive_F >= p_inactive & Score_total <  p_tox ~ "2-1",
+        share_Inactive_F <  p_inactive & Score_total >= p_tox ~ "1-2",
+        TRUE ~ "1-1"
+      )
+    ) %>%
+    group_by(STATE_COUNTY_FIP) %>%
+    mutate(
+      bi_class = case_when(
+        any(bi_class == "2-2") ~ "2-2",
+        any(bi_class == "2-1") ~ "2-1",
+        any(bi_class == "1-2") ~ "1-2",
+        TRUE ~ NA_character_
+      )
+    ) %>%
+    ungroup() %>%
+    arrange(STATE_COUNTY_FIP) %>%
+    mutate(STATE_COUNTY_FIP = as.character(STATE_COUNTY_FIP)) %>%
+    left_join(county_geom, by = c("STATE_COUNTY_FIP" = "GEOID"))
+
+  inactive_states <- inactive %>%
+    distinct(STATE_COUNTY_FIP, STATEFP, geometry, bi_class) %>%
+    filter(!(STATEFP %in% c("02", "15", "72")), bi_class == "2-2")
+
+  geom_states <- county_geom %>%
+    filter(!(STATEFP %in% c("02", "15", "72")))
+
+  inactive_states <- st_sf(inactive_states)
+  geom_states     <- st_sf(geom_states)
+
+  assign(paste0("inactive_states_", thresh$label), inactive_states)
+  assign(paste0("geom_states_", thresh$label), geom_states)
+
+  inactive_map <- ggplot() +
+    geom_sf(data = states,          fill = "white", color = NA) +
+    geom_sf(data = inactive_states, aes(fill = bi_class), color = NA,
+            show.legend = FALSE) +
+    geom_sf(data = states,          fill = NA, color = "grey50", linewidth = 0.3) +
+    bi_scale_fill(pal = "DkViolet2", dim = 2, na.value = "white") +
+    bi_theme() +
+    coord_sf(expand = FALSE)
+
+  ggsave(paste0("out/maps/inactive_tract_county_", thresh$label, ".png"),
+         plot = inactive_map, dpi = 300)
+  print(inactive_map)
+}
+```
+
+```{r inactivity-combined-map}
+combined_map <- ggplot() +
+  geom_sf(data = states,               fill = "white", color = NA) +
+  geom_sf(data = inactive_states_20pc, aes(fill = "20% hotspot counties in terms of inactivity"), color = NA) +
+  geom_sf(data = inactive_states_10pc, aes(fill = "10% hotspot counties in terms of inactivity"), color = NA) +
+  geom_sf(data = states,               fill = NA, color = "grey50", linewidth = 0.3) +
+  scale_fill_manual(
+    name   = NULL,
+    values = c("20% hotspot counties in terms of inactivity" = "#1A0033",
+               "10% hotspot counties in terms of inactivity" = "#7B0000"),
+    guide  = guide_legend(override.aes = list(color = NA))
+  ) +
+  bi_theme() +
+  coord_sf(expand = FALSE) +
+  theme(
+    legend.position      = c(0.03, 0.05),
+    legend.justification = c(0, 0),
+    legend.background    = element_rect(fill = "white", color = "grey60", linewidth = 0.4),
+    legend.text          = element_text(size = 8),
+    legend.key.size      = unit(0.32, "cm")
+  )
+
+ggsave("out/maps/inactive_tract_county_10pc_20pc.png", plot = combined_map, dpi = 300)
+print(combined_map)
+```
+
+```{r inactivity-export}
+counties_10pc <- inactive %>%
+  group_by(STATE_COUNTY_FIP, CountyName, State_fips) %>%
+  summarise(
+    share_Inactive_F_mean = mean(share_Inactive_F, na.rm = TRUE),
+    Score_total_mean      = mean(Score_total,       na.rm = TRUE),
+    bi_class              = first(bi_class),
+    .groups = "drop"
+  ) %>%
+  filter(bi_class == "2-2") %>%
+  arrange(State_fips, CountyName)
+
+writexl::write_xlsx(counties_10pc, "out/validation/counties_10pc_hotspots.xlsx")
+cat("Exported", nrow(counties_10pc), "counties to out/counties_10pc_hotspots.xlsx\n")
+```
+
+```{r inactivity-county-list}
+inactivity_hotspot_counties <- bind_rows(
+    inactive_states_20pc %>% st_drop_geometry() %>% distinct(STATE_COUNTY_FIP),
+    inactive_states_10pc %>% st_drop_geometry() %>% distinct(STATE_COUNTY_FIP)
+  ) %>%
+  distinct(STATE_COUNTY_FIP) %>%
+  left_join(
+    inactive %>% distinct(STATE_COUNTY_FIP, CountyName, State_fips),
+    by = "STATE_COUNTY_FIP"
+  ) %>%
+  arrange(State_fips, CountyName)
+
+cat("\n=== Counties in inactivity_tract_county_10pc_20pc map ===\n")
+cat(paste0("  ", inactivity_hotspot_counties$CountyName,
+           " (FIPS ", inactivity_hotspot_counties$STATE_COUNTY_FIP, ")"),
+    sep = "\n")
+cat(sprintf("\nTotal: %d counties\n", nrow(inactivity_hotspot_counties)))
+```
+
+---
+
+## 2. Median Earnings Maps
+
+Same bi-variate approach using inverted female earnings (`Female_inv`) instead of inactivity.
+
+```{r earnings-data}
+earnings <- read.csv("in/mean_hours.csv")
+
+county_shp <- read_sf("in/tl_2022_us_county/tl_2022_us_county.shp")
+
+county_geom <- county_shp %>%
+  distinct(GEOID, STATEFP, geometry) %>%
+  filter(STATEFP %in% unique(states_poll)) %>%
+  arrange(GEOID)
+```
+
+```{r earnings-loop}
+for (thresh in list(list(q = 0.80, label = "20pc", pct = "20%"),
+                    list(q = 0.90, label = "10pc", pct = "10%"))) {
+
+  p_earn_inv <- quantile(earnings$Female_inv, thresh$q, na.rm = TRUE)
+  p_tox      <- quantile(earnings$Score_total, thresh$q, na.rm = TRUE)
+
+  earnings_cl <- earnings %>%
+    mutate(
+      bi_class = case_when(
+        Female_inv >= p_earn_inv & Score_total >= p_tox ~ "2-2",
+        Female_inv >= p_earn_inv & Score_total <  p_tox ~ "2-1",
+        Female_inv <  p_earn_inv & Score_total >= p_tox ~ "1-2",
+        TRUE ~ "1-1"
+      )
+    ) %>%
+    group_by(STATE_COUNTY_FIP) %>%
+    mutate(
+      bi_class = case_when(
+        any(bi_class == "2-2") ~ "2-2",
+        any(bi_class == "2-1") ~ "2-1",
+        any(bi_class == "1-2") ~ "1-2",
+        TRUE ~ NA_character_
+      )
+    ) %>%
+    ungroup() %>%
+    arrange(STATE_COUNTY_FIP) %>%
+    mutate(STATE_COUNTY_FIP = as.character(STATE_COUNTY_FIP)) %>%
+    left_join(county_geom, by = c("STATE_COUNTY_FIP" = "GEOID"))
+
+  earnings_states <- earnings_cl %>%
+    distinct(STATE_COUNTY_FIP, STATEFP, geometry, bi_class) %>%
+    filter(!(STATEFP %in% c("02", "15", "72")), bi_class == "2-2")
+
+  geom_earn_states <- county_geom %>%
+    filter(!(STATEFP %in% c("02", "15", "72")))
+
+  earnings_states  <- st_sf(earnings_states)
+  geom_earn_states <- st_sf(geom_earn_states)
+
+  assign(paste0("earnings_states_", thresh$label), earnings_states)
+
+  earnings_map <- ggplot() +
+    geom_sf(data = states,          fill = "white", color = NA) +
+    geom_sf(data = earnings_states, aes(fill = bi_class), color = NA,
+            show.legend = FALSE) +
+    geom_sf(data = states,          fill = NA, color = "grey50", linewidth = 0.3) +
+    bi_scale_fill(pal = "DkViolet2", dim = 2, na.value = "white") +
+    bi_theme() +
+    coord_sf(expand = FALSE)
+
+  ggsave(paste0("out/maps/earnings_tract_county_", thresh$label, ".png"),
+         plot = earnings_map, dpi = 300)
+  print(earnings_map)
+}
+```
+
+```{r earnings-combined-map}
+earnings_combined_map <- ggplot() +
+  geom_sf(data = states,               fill = "white", color = NA) +
+  geom_sf(data = earnings_states_20pc, aes(fill = "20% hotspot counties in terms of earnings"), color = NA) +
+  geom_sf(data = earnings_states_10pc, aes(fill = "10% hotspot counties in terms of earnings"), color = NA) +
+  geom_sf(data = states,               fill = NA, color = "grey50", linewidth = 0.3) +
+  scale_fill_manual(
+    name   = NULL,
+    values = c("20% hotspot counties in terms of earnings" = "#4169E1",
+               "10% hotspot counties in terms of earnings" = "#00005C"),
+    guide  = guide_legend(override.aes = list(color = NA))
+  ) +
+  bi_theme() +
+  coord_sf(expand = FALSE) +
+  theme(
+    legend.position      = c(0.03, 0.05),
+    legend.justification = c(0, 0),
+    legend.background    = element_rect(fill = "white", color = "grey60", linewidth = 0.4),
+    legend.text          = element_text(size = 8),
+    legend.key.size      = unit(0.32, "cm")
+  )
+
+ggsave("out/maps/earnings_tract_county_10pc_20pc.png", plot = earnings_combined_map, dpi = 300)
+print(earnings_combined_map)
+```
+
+```{r earnings-county-list}
+earnings_hotspot_counties <- bind_rows(
+    earnings_states_20pc %>% st_drop_geometry() %>% distinct(STATE_COUNTY_FIP),
+    earnings_states_10pc %>% st_drop_geometry() %>% distinct(STATE_COUNTY_FIP)
+  ) %>%
+  distinct(STATE_COUNTY_FIP) %>%
+  left_join(
+    earnings_cl %>% distinct(STATE_COUNTY_FIP, CountyName, State_fips),
+    by = "STATE_COUNTY_FIP"
+  ) %>%
+  arrange(State_fips, CountyName)
+
+cat("\n=== Counties in earnings_tract_county_10pc_20pc map ===\n")
+cat(paste0("  ", earnings_hotspot_counties$CountyName,
+           " (FIPS ", earnings_hotspot_counties$STATE_COUNTY_FIP, ")"),
+    sep = "\n")
+cat(sprintf("\nTotal: %d counties\n", nrow(earnings_hotspot_counties)))
+```
+
+---
+
+## 3. Employment Maps
+
+```{r employment-loop}
+empl_stat <- read.csv("in/empl_stat.csv")
+
+for (thresh in list(list(q = 0.80, label = "20pc", pct = "20%"),
+                    list(q = 0.90, label = "10pc", pct = "10%"))) {
+
+  p_employ <- quantile(empl_stat$share_Employed_F, thresh$q, na.rm = TRUE)
+  p_tox    <- quantile(empl_stat$Score_total,       thresh$q, na.rm = TRUE)
+
+  employ_cl <- empl_stat %>%
+    mutate(
+      bi_class = case_when(
+        share_Employed_F >= p_employ & Score_total >= p_tox ~ "2-2",
+        share_Employed_F >= p_employ & Score_total <  p_tox ~ "2-1",
+        share_Employed_F <  p_employ & Score_total >= p_tox ~ "1-2",
+        TRUE ~ "1-1"
+      )
+    ) %>%
+    group_by(STATE_COUNTY_FIP) %>%
+    mutate(
+      bi_class = case_when(
+        any(bi_class == "2-2") ~ "2-2",
+        any(bi_class == "2-1") ~ "2-1",
+        any(bi_class == "1-2") ~ "1-2",
+        TRUE ~ NA_character_
+      )
+    ) %>%
+    ungroup() %>%
+    arrange(STATE_COUNTY_FIP) %>%
+    mutate(STATE_COUNTY_FIP = as.character(STATE_COUNTY_FIP)) %>%
+    left_join(county_geom, by = c("STATE_COUNTY_FIP" = "GEOID"))
+
+  employ_states <- employ_cl %>%
+    distinct(STATE_COUNTY_FIP, STATEFP, geometry, bi_class) %>%
+    filter(!(STATEFP %in% c("02", "15", "72")), bi_class == "2-2")
+
+  employ_states <- st_sf(employ_states)
+  assign(paste0("employ_states_", thresh$label), employ_states)
+
+  employ_map <- ggplot() +
+    geom_sf(data = states,        fill = "white", color = NA) +
+    geom_sf(data = employ_states, aes(fill = bi_class), color = NA,
+            show.legend = FALSE) +
+    geom_sf(data = states,        fill = NA, color = "grey50", linewidth = 0.3) +
+    bi_scale_fill(pal = "DkViolet2", dim = 2, na.value = "white") +
+    bi_theme() +
+    coord_sf(expand = FALSE)
+
+  ggsave(paste0("out/maps/employ_tract_county_", thresh$label, ".png"),
+         plot = employ_map, dpi = 300)
+  print(employ_map)
+}
+```
+
+```{r employment-combined-map}
+employ_combined_map <- ggplot() +
+  geom_sf(data = states,             fill = "white", color = NA) +
+  geom_sf(data = employ_states_20pc, aes(fill = "20% hotspot counties in terms of employment"), color = NA) +
+  geom_sf(data = employ_states_10pc, aes(fill = "10% hotspot counties in terms of employment"), color = NA) +
+  geom_sf(data = states,             fill = NA, color = "grey50", linewidth = 0.3) +
+  scale_fill_manual(
+    name   = NULL,
+    values = c("20% hotspot counties in terms of employment" = "#D4820A",
+               "10% hotspot counties in terms of employment" = "#6B3A00"),
+    guide  = guide_legend(override.aes = list(color = NA))
+  ) +
+  bi_theme() +
+  coord_sf(expand = FALSE) +
+  theme(
+    legend.position      = c(0.03, 0.05),
+    legend.justification = c(0, 0),
+    legend.background    = element_rect(fill = "white", color = "grey60", linewidth = 0.4),
+    legend.text          = element_text(size = 5),
+    legend.key.size      = unit(0.17, "cm")
+  )
+
+ggsave("out/maps/employ_tract_county_10pc_20pc.png", plot = employ_combined_map, dpi = 300)
+print(employ_combined_map)
+```
+
+---
+
+## 4. Toxicity-Only Map
+
+```{r toxicity-map}
+for (thresh in list(list(q = 0.80, label = "20pc"),
+                    list(q = 0.90, label = "10pc"))) {
+
+  p_tox <- quantile(empl_stat$Score_total, thresh$q, na.rm = TRUE)
+
+  tox <- empl_stat %>%
+    mutate(hotspot = Score_total >= p_tox) %>%
+    group_by(STATE_COUNTY_FIP) %>%
+    mutate(hotspot = any(hotspot)) %>%
+    ungroup() %>%
+    arrange(STATE_COUNTY_FIP) %>%
+    mutate(STATE_COUNTY_FIP = as.character(STATE_COUNTY_FIP)) %>%
+    left_join(county_geom, by = c("STATE_COUNTY_FIP" = "GEOID"))
+
+  tox_states <- tox %>%
+    distinct(STATE_COUNTY_FIP, STATEFP, geometry, hotspot) %>%
+    filter(!(STATEFP %in% c("02", "15", "72")), hotspot == TRUE)
+
+  assign(paste0("tox_states_", thresh$label), st_sf(tox_states))
+}
+
+tox_geom <- county_geom %>%
+  filter(!(STATEFP %in% c("02", "15", "72"))) %>%
+  st_sf()
+
+tox_combined_map <- ggplot() +
+  geom_sf(data = states,          fill = "white", color = NA) +
+  geom_sf(data = tox_states_20pc, aes(fill = "20% hotspot counties"), color = NA) +
+  geom_sf(data = tox_states_10pc, aes(fill = "10% hotspot counties"), color = NA) +
+  geom_sf(data = states,          fill = NA, color = "grey50", linewidth = 0.3) +
+  scale_fill_manual(
+    name   = NULL,
+    values = c("20% hotspot counties" = "#2E8B57", "10% hotspot counties" = "#004D00"),
+    guide  = guide_legend(override.aes = list(color = NA))
+  ) +
+  coord_sf(expand = FALSE) +
+  theme_void() +
+  theme(
+    legend.position      = c(0.03, 0.05),
+    legend.justification = c(0, 0),
+    legend.background    = element_rect(fill = "white", color = "grey60", linewidth = 0.4),
+    legend.text          = element_text(size = 5),
+    legend.key.size      = unit(0.17, "cm")
+  )
+
+ggsave("out/maps/toxicity_tract_county_10pc_20pc.png", plot = tox_combined_map, dpi = 300)
+print(tox_combined_map)
+```
+
+---
+
+## 5. Solar Facilities Map
+
+```{r solar-data}
+solar_data_map <- read.csv("in/solar_data_map.csv", sep = ";")
+
+clean_coordinate <- function(x, min_val, max_val) {
+  x_num <- as.numeric(gsub("[^0-9-]", "", x))
+  if (is.na(x_num)) return(NA)
+  val          <- abs(x_num)
+  lower_bound  <- min(abs(min_val), abs(max_val))
+  upper_bound  <- max(abs(min_val), abs(max_val))
+  while (val > upper_bound) val <- val / 10
+  return(ifelse(x_num < 0, -val, val))
+}
+
+solar_geo <- solar_data_map %>%
+  rowwise() %>%
+  mutate(
+    lon_clean = clean_coordinate(longitude, -125, -66),
+    lat_clean = clean_coordinate(latitude,   24,   49)
+  ) %>%
+  ungroup() %>%
+  filter(!is.na(lon_clean), !is.na(lat_clean))
+
+solar_sf <- st_as_sf(solar_geo, coords = c("lon_clean", "lat_clean"), crs = 4326)
+```
+
+```{r solar-map}
+ggplot() +
+  geom_sf(data = states,   fill = "white", color = "grey80", size = 0.1) +
+  geom_sf(data = solar_sf, aes(color = facility_type), size = 2, alpha = 0.7) +
+  scale_color_viridis_d(option = "plasma") +
+  coord_sf(expand = FALSE) +
+  theme_void() +
+  labs(color = "Facility Type")
+
+ggsave("out/maps/solar_map.png", dpi = 300)
+```
+
+### 5.1 Solar overlay – national (inactivity hotspots)
+
+```{r solar-hotspot-buffer}
+hotspot_buffer <- inactive_states_20pc %>%
+  st_transform(5070) %>%
+  st_union() %>%
+  st_buffer(16093)
+
+solar_near_hotspots <- solar_sf %>%
+  st_transform(5070) %>%
+  st_filter(hotspot_buffer) %>%
+  st_transform(st_crs(geom_states_10pc))
+```
+
+```{r solar-overlay-national}
+overlay_map <- ggplot() +
+  geom_sf(data = states,               fill = "white", color = NA) +
+  geom_sf(data = inactive_states_20pc, aes(fill = "20% hotspot counties"), color = NA) +
+  geom_sf(data = inactive_states_10pc, aes(fill = "10% hotspot counties"), color = NA) +
+  scale_fill_manual(
+    name   = NULL,
+    values = c("20% hotspot counties" = "#1A0033", "10% hotspot counties" = "#7B0000"),
+    guide  = guide_legend(override.aes = list(color = NA))
+  ) +
+  geom_sf(data = solar_near_hotspots, aes(color = facility_type), size = 1.5, alpha = 0.85) +
+  geom_sf(data = states, fill = NA, color = "grey50", linewidth = 0.3) +
+  scale_color_viridis_d(option = "plasma", name = "Solar facility type") +
+  coord_sf(expand = FALSE) +
+  theme_void() +
+  theme(
+    legend.position = "bottom",
+    legend.title    = element_text(face = "bold", size = 5),
+    legend.text     = element_text(size = 5)
+  ) +
+  guides(
+    fill  = guide_legend(order = 1, override.aes = list(color = NA)),
+    color = guide_legend(order = 2, nrow = 2, override.aes = list(size = 3))
+  )
+
+ggsave("out/maps/solar_inactive_overlay.png", plot = overlay_map, width = 14, height = 8, dpi = 300)
+print(overlay_map)
+```
+
+### 5.2 Solar overlay – Rust Belt
+
+```{r solar-overlay-rustbelt}
+xmin <- -92.0; xmax <- -74.5; ymin <- 36.5; ymax <- 47.5
+
+overlay_map_Rust_Belt <- ggplot() +
+  geom_sf(data = states,               fill = "white", color = NA) +
+  geom_sf(data = inactive_states_20pc, aes(fill = "20% hotspot counties"), color = NA) +
+  geom_sf(data = inactive_states_10pc, aes(fill = "10% hotspot counties"), color = NA) +
+  scale_fill_manual(
+    name   = NULL,
+    values = c("20% hotspot counties" = "#1A0033", "10% hotspot counties" = "#7B0000"),
+    guide  = guide_legend(override.aes = list(color = NA))
+  ) +
+  geom_sf(data = solar_near_hotspots, aes(color = facility_type), size = 1.5, alpha = 0.85) +
+  geom_sf(data = states, fill = NA, color = "grey50", linewidth = 0.3) +
+  scale_color_viridis_d(option = "plasma", name = "Solar facility type") +
+  coord_sf(xlim = c(xmin, xmax), ylim = c(ymin, ymax), expand = FALSE) +
+  theme_void() +
+  theme(legend.position = "bottom",
+        legend.title    = element_text(face = "bold", size = 5),
+        legend.text     = element_text(size = 5)) +
+  guides(fill  = guide_legend(order = 1, override.aes = list(color = NA)),
+         color = guide_legend(order = 2, nrow = 2, override.aes = list(size = 3)))
+
+ggsave("out/maps/rustbelt/solar_inactive_overlay_Rust_Belt.png",
+       plot = overlay_map_Rust_Belt, width = 10, height = 7, dpi = 300)
+print(overlay_map_Rust_Belt)
+```
+
+### 5.3 Solar overlay – South
+
+```{r solar-overlay-south}
+xmin <- -97.5; xmax <- -85.5; ymin <- 28.5; ymax <- 35.5
+
+overlay_map_South <- ggplot() +
+  geom_sf(data = states,               fill = "white", color = NA) +
+  geom_sf(data = inactive_states_20pc, aes(fill = "20% hotspot counties"), color = NA) +
+  geom_sf(data = inactive_states_10pc, aes(fill = "10% hotspot counties"), color = NA) +
+  scale_fill_manual(
+    name   = NULL,
+    values = c("20% hotspot counties" = "#1A0033", "10% hotspot counties" = "#7B0000"),
+    guide  = guide_legend(override.aes = list(color = NA))
+  ) +
+  geom_sf(data = solar_near_hotspots, aes(color = facility_type), size = 1.5, alpha = 0.85) +
+  geom_sf(data = states, fill = NA, color = "grey50", linewidth = 0.3) +
+  scale_color_viridis_d(option = "plasma", name = "Solar facility type") +
+  coord_sf(xlim = c(xmin, xmax), ylim = c(ymin, ymax), expand = FALSE) +
+  theme_void() +
+  theme(legend.position = "bottom",
+        legend.title    = element_text(face = "bold", size = 5),
+        legend.text     = element_text(size = 5)) +
+  guides(fill  = guide_legend(order = 1, override.aes = list(color = NA)),
+         color = guide_legend(order = 2, nrow = 2, override.aes = list(size = 3)))
+
+ggsave("out/maps/south/solar_inactive_overlay_South.png",
+       plot = overlay_map_South, width = 10, height = 7, dpi = 300)
+print(overlay_map_South)
+```
+
+### 5.4 Solar overlay – Utah (no legend)
+
+```{r solar-overlay-utah}
+xmin <- -114.1; xmax <- -109.0; ymin <- 36.9; ymax <- 42.0
+
+overlay_map_Utah <- ggplot() +
+  geom_sf(data = states,               fill = "white", color = NA) +
+  geom_sf(data = inactive_states_20pc, aes(fill = "20% hotspot counties"), color = NA) +
+  geom_sf(data = inactive_states_10pc, aes(fill = "10% hotspot counties"), color = NA) +
+  scale_fill_manual(
+    name   = NULL,
+    values = c("20% hotspot counties" = "#1A0033", "10% hotspot counties" = "#7B0000"),
+    guide  = "none"
+  ) +
+  geom_sf(data = solar_near_hotspots, aes(color = facility_type), size = 1.5, alpha = 0.85) +
+  scale_color_viridis_d(option = "plasma", name = "Solar facility type", guide = "none") +
+  coord_sf(xlim = c(xmin, xmax), ylim = c(ymin, ymax), expand = FALSE) +
+  theme_void()
+
+ggsave("out/maps/utah/solar_inactive_overlay_Utah.png",
+       plot = overlay_map_Utah, width = 10, height = 7, dpi = 300)
+print(overlay_map_Utah)
+```
+
+---
+
+## 6. Battery Supply-Chain Facilities Map
+
+```{r battery-data}
+file_path      <- "in/naatbatt-database-31march2026.xlsx"
+all_sheets     <- excel_sheets(file_path)
+target_sheets  <- all_sheets[8:19]
+
+battery_facilities <- target_sheets %>%
+  set_names() %>%
+  map_df(~read_excel(path = file_path, sheet = .x,
+                     col_types = "text", trim_ws = TRUE),
+         .id = "origin_sheet")
+
+battery_geo <- battery_facilities %>%
+  mutate(
+    lon_clean        = as.numeric(Longitude),
+    lat_clean        = as.numeric(Latitude),
+    missing          = ifelse(is.na(lon_clean) & !is.na(Longitude), 1, 0),
+    facility_country = ifelse(`Facility State or Province` == "ON", "Canada", `Facility Country`),
+    lon_clean        = ifelse(lon_clean > 0, lon_clean * -1, lon_clean)
+  ) %>%
+  filter(is.finite(lon_clean) & is.finite(lat_clean),
+         `Facility Country` == "US",
+         !(`Facility State or Province` %in% c("TBA", "AK"))) %>%
+  mutate(
+    lon_clean = ifelse(lon_clean == -70.60000 & lat_clean == 40.00000, -74.7126, lon_clean),
+    lat_clean = ifelse(lon_clean == -70.60000 & lat_clean == 40.00000,  40.1135, lat_clean)
+  )
+
+battery_sf <- st_as_sf(battery_geo, coords = c("lon_clean", "lat_clean"), crs = 4326)
+battery_sf$origin_sheet <- factor(battery_sf$origin_sheet,
+                                   levels = unique(battery_sf$origin_sheet))
+```
+
+```{r battery-overlay-national}
+battery_near_hotspots <- battery_sf %>%
+  st_transform(5070) %>%
+  st_filter(hotspot_buffer) %>%
+  st_transform(st_crs(geom_states_10pc))
+
+battery_overlay_map <- ggplot() +
+  geom_sf(data = states,               fill = "white", color = NA) +
+  geom_sf(data = inactive_states_20pc, aes(fill = "20% hotspot counties"), color = NA) +
+  geom_sf(data = inactive_states_10pc, aes(fill = "10% hotspot counties"), color = NA) +
+  scale_fill_manual(
+    name   = NULL,
+    values = c("20% hotspot counties" = "#1A0033", "10% hotspot counties" = "#7B0000"),
+    guide  = guide_legend(override.aes = list(color = NA))
+  ) +
+  geom_sf(data = battery_near_hotspots, aes(color = origin_sheet), size = 1.5, alpha = 0.85) +
+  geom_sf(data = states, fill = NA, color = "grey50", linewidth = 0.3) +
+  scale_color_viridis_d(option = "plasma", name = "Battery facility type") +
+  coord_sf(expand = FALSE) +
+  theme_void() +
+  theme(legend.position = "bottom",
+        legend.title    = element_text(face = "bold", size = 8),
+        legend.text     = element_text(size = 8)) +
+  guides(fill  = guide_legend(order = 1, override.aes = list(color = NA)),
+         color = guide_legend(order = 2, nrow = 2, override.aes = list(size = 3)))
+
+ggsave("out/maps/battery_inactive_overlay.png",
+       plot = battery_overlay_map, width = 14, height = 8, dpi = 300)
+print(battery_overlay_map)
+```
+
+### 6.1 Battery overlay – Rust Belt
+
+```{r battery-overlay-rustbelt}
+xmin <- -92.0; xmax <- -74.5; ymin <- 36.5; ymax <- 47.5
+
+battery_overlay_map_Rust_Belt <- ggplot() +
+  geom_sf(data = states,               fill = "white", color = NA) +
+  geom_sf(data = inactive_states_20pc, aes(fill = "20% hotspot counties"), color = NA) +
+  geom_sf(data = inactive_states_10pc, aes(fill = "10% hotspot counties"), color = NA) +
+  scale_fill_manual(
+    name   = NULL,
+    values = c("20% hotspot counties" = "#1A0033", "10% hotspot counties" = "#7B0000"),
+    guide  = guide_legend(override.aes = list(color = NA))
+  ) +
+  geom_sf(data = battery_near_hotspots, aes(color = origin_sheet), size = 1.5, alpha = 0.85) +
+  geom_sf(data = states, fill = NA, color = "grey50", linewidth = 0.3) +
+  scale_color_viridis_d(option = "plasma", name = "Battery facility type") +
+  coord_sf(xlim = c(xmin, xmax), ylim = c(ymin, ymax), expand = FALSE) +
+  theme_void() +
+  theme(legend.position = "bottom",
+        legend.title    = element_text(face = "bold", size = 8),
+        legend.text     = element_text(size = 7)) +
+  guides(fill  = guide_legend(order = 1, override.aes = list(color = NA)),
+         color = guide_legend(order = 2, nrow = 2, override.aes = list(size = 3)))
+
+ggsave("out/maps/rustbelt/battery_inactive_overlay_rustbelt.png",
+       plot = battery_overlay_map_Rust_Belt, width = 10, height = 7, dpi = 300)
+print(battery_overlay_map_Rust_Belt)
+```
+
+### 6.2 Battery overlay – South
+
+```{r battery-overlay-south}
+xmin <- -97.5; xmax <- -85.5; ymin <- 28.5; ymax <- 35.5
+
+battery_overlay_map_South <- ggplot() +
+  geom_sf(data = states,               fill = "white", color = NA) +
+  geom_sf(data = inactive_states_20pc, aes(fill = "20% hotspot counties"), color = NA) +
+  geom_sf(data = inactive_states_10pc, aes(fill = "10% hotspot counties"), color = NA) +
+  scale_fill_manual(
+    name   = NULL,
+    values = c("20% hotspot counties" = "#1A0033", "10% hotspot counties" = "#7B0000"),
+    guide  = guide_legend(override.aes = list(color = NA))
+  ) +
+  geom_sf(data = battery_near_hotspots, aes(color = origin_sheet), size = 1.5, alpha = 0.85) +
+  geom_sf(data = states, fill = NA, color = "grey50", linewidth = 0.3) +
+  scale_color_viridis_d(option = "plasma", name = "Battery facility type") +
+  coord_sf(xlim = c(xmin, xmax), ylim = c(ymin, ymax), expand = FALSE) +
+  theme_void() +
+  theme(legend.position = "bottom",
+        legend.title    = element_text(face = "bold", size = 8),
+        legend.text     = element_text(size = 7)) +
+  guides(fill  = guide_legend(order = 1, override.aes = list(color = NA)),
+         color = guide_legend(order = 2, nrow = 2, override.aes = list(size = 3)))
+
+ggsave("out/maps/south/battery_inactive_overlay_South.png",
+       plot = battery_overlay_map_South, width = 10, height = 7, dpi = 300)
+print(battery_overlay_map_South)
+```
+
+### 6.3 Battery overlay – Utah (no legend)
+
+```{r battery-overlay-utah}
+xmin <- -114.1; xmax <- -109.0; ymin <- 36.9; ymax <- 42.0
+
+battery_overlay_map_Utah <- ggplot() +
+  geom_sf(data = states,               fill = "white", color = NA) +
+  geom_sf(data = inactive_states_20pc, aes(fill = "20% hotspot counties"), color = NA) +
+  geom_sf(data = inactive_states_10pc, aes(fill = "10% hotspot counties"), color = NA) +
+  scale_fill_manual(
+    name   = NULL,
+    values = c("20% hotspot counties" = "#1A0033", "10% hotspot counties" = "#7B0000"),
+    guide  = "none"
+  ) +
+  geom_sf(data = battery_near_hotspots, aes(color = origin_sheet), size = 1.5, alpha = 0.85) +
+  scale_color_viridis_d(option = "plasma", name = "Battery facility type", guide = "none") +
+  coord_sf(xlim = c(xmin, xmax), ylim = c(ymin, ymax), expand = FALSE) +
+  theme_void()
+
+ggsave("out/maps/utah/battery_inactive_overlay_Utah.png",
+       plot = battery_overlay_map_Utah, width = 10, height = 7, dpi = 300)
+print(battery_overlay_map_Utah)
+```
+
+### 6.4 Full battery map with Alaska inset
+
+```{r battery-full-map}
+states_ak   <- state_shp %>% filter(STATEFP == "02")
+
+battery_ak <- battery_facilities %>%
+  mutate(
+    lon_clean        = as.numeric(Longitude),
+    lat_clean        = as.numeric(Latitude),
+    missing          = ifelse(is.na(lon_clean) & !is.na(Longitude), 1, 0),
+    facility_country = ifelse(`Facility State or Province` == "ON", "Canada", `Facility Country`),
+    lon_clean        = ifelse(lon_clean > 0, lon_clean * -1, lon_clean)
+  ) %>%
+  filter(is.finite(lon_clean) & is.finite(lat_clean),
+         `Facility Country` == "US",
+         `Facility State or Province` == "AK")
+
+battery_ak_sf <- st_as_sf(battery_ak, coords = c("lon_clean", "lat_clean"), crs = 4326)
+
+ak_map <- ggplot() +
+  geom_sf(data = states_ak,      fill = "white", color = "grey80", size = 0.1) +
+  geom_sf(data = battery_ak_sf,  aes(color = origin_sheet),
+          size = 2, alpha = 0.7, show.legend = FALSE) +
+  coord_sf(xlim = c(-170, -130), ylim = c(50, 72), expand = FALSE) +
+  theme_void() +
+  theme(panel.border = element_rect(color = "black", fill = NA, size = 0.5))
+
+tot_map <- ggplot() +
+  geom_sf(data = states,      fill = "white", color = "grey80", size = 0.1) +
+  geom_sf(data = battery_sf,  aes(color = origin_sheet), size = 2, alpha = 0.7) +
+  scale_color_discrete(drop = FALSE) +
+  theme_void() +
+  labs(color = "Facility Type") +
+  guides(color = guide_legend(position = "right", nrow = 12))
+
+battery_plot <- ggdraw() +
+  draw_plot(tot_map, 0,    0,    1,    1) +
+  draw_plot(ak_map,  0.05, 0.05, 0.20, 0.30)
+
+ggsave("out/maps/battery_map.png", plot = battery_plot, dpi = 300)
+print(battery_plot)
+```
+
+---
+
+## 7. Co-location Statistics
+
+Share of inactivity/earnings hotspot counties that have at least one solar or battery facility within **10 miles**.
+
+```{r colocation-stats}
+solar_proj   <- solar_sf   %>% st_transform(5070)
+battery_proj <- battery_sf %>% st_transform(5070)
+
+coloc_pct <- function(hotspot_sf, facility_proj) {
+  buf <- hotspot_sf %>% st_transform(5070) %>% st_buffer(16093)
+  mean(lengths(st_intersects(buf, facility_proj)) > 0, na.rm = TRUE) * 100
+}
+
+inact_n       <- nrow(inactive_states_20pc)
+earn_n        <- nrow(earnings_states_20pc)
+
+inact_solar   <- coloc_pct(inactive_states_20pc, solar_proj)
+inact_battery <- coloc_pct(inactive_states_20pc, battery_proj)
+earn_solar    <- coloc_pct(earnings_states_20pc,  solar_proj)
+earn_battery  <- coloc_pct(earnings_states_20pc,  battery_proj)
+
+cat("\n===== CO-LOCATION STATISTICS (facility within 10 miles of hotspot county) =====\n")
+cat(sprintf("\nAmong the %d inactivity hotspot counties, %.1f%% have a solar facility within 10 miles.\n",
+            inact_n, inact_solar))
+cat(sprintf("Among inactivity hotspot counties, %.1f%% have a battery facility within 10 miles.\n",
+            inact_battery))
+cat(sprintf("\nAmong the %d low-earnings hotspot counties, %.1f%% have a solar facility within 10 miles.\n",
+            earn_n, earn_solar))
+cat(sprintf("Among low-earnings hotspot counties, %.1f%% have a battery facility within 10 miles.\n",
+            earn_battery))
+```
+
+```{r colocation-county-lists}
+inact_proj  <- inactive_states_20pc %>% st_transform(5070)
+inact_buf   <- inact_proj %>% st_buffer(16093)
+
+has_solar   <- lengths(st_intersects(inact_buf, solar_proj))   > 0
+has_battery <- lengths(st_intersects(inact_buf, battery_proj)) > 0
+
+inact_county_names <- inactive_states_20pc %>%
+  st_drop_geometry() %>%
+  left_join(inactive %>% distinct(STATE_COUNTY_FIP, CountyName, State_fips),
+            by = "STATE_COUNTY_FIP")
+
+solar_counties   <- inact_county_names[has_solar,   ] %>% arrange(State_fips, CountyName)
+battery_counties <- inact_county_names[has_battery, ] %>% arrange(State_fips, CountyName)
+
+cat("\n=== Inactivity hotspot counties with a SOLAR facility within 10 miles ===\n")
+cat(paste0("  ", solar_counties$CountyName,
+           " (FIPS ", solar_counties$STATE_COUNTY_FIP, ")"), sep = "\n")
+cat(sprintf("\nTotal: %d counties\n", nrow(solar_counties)))
+
+cat("\n=== Inactivity hotspot counties with a BATTERY facility within 10 miles ===\n")
+cat(paste0("  ", battery_counties$CountyName,
+           " (FIPS ", battery_counties$STATE_COUNTY_FIP, ")"), sep = "\n")
+cat(sprintf("\nTotal: %d counties\n", nrow(battery_counties)))
+```
+
+```{r colocation-overlap}
+inact_fips   <- inactive_states_20pc$STATE_COUNTY_FIP
+earn_fips    <- earnings_states_20pc$STATE_COUNTY_FIP
+n_overlap    <- length(intersect(inact_fips, earn_fips))
+pct_of_inact <- n_overlap / length(inact_fips) * 100
+pct_of_earn  <- n_overlap / length(earn_fips)  * 100
+
+cat(sprintf(
+  "\n%d counties appear in both hotspot sets (20%% threshold): %.1f%% of inactivity hotspots, %.1f%% of earnings hotspots.\n",
+  n_overlap, pct_of_inact, pct_of_earn))
+```
+
+---
+
+## 8. County Lists Export
+
+Single Excel file with one sheet per map, listing the counties visible in each figure.
+
+```{r county-lists-export}
+make_sheet <- function(hotspot_fips_vec, tract_data) {
+  tract_data %>%
+    mutate(STATE_COUNTY_FIP = as.character(STATE_COUNTY_FIP)) %>%
+    filter(STATE_COUNTY_FIP %in% as.character(hotspot_fips_vec),
+           bi_class == "2-2") %>%
+    group_by(STATE_COUNTY_FIP, CountyName, State_fips) %>%
+    summarise(Score_total = mean(Score_total, na.rm = TRUE),
+              .groups = "drop") %>%
+    mutate(county_rank = dense_rank(desc(Score_total))) %>%
+    arrange(county_rank, State_fips, CountyName) %>%
+    select(county_rank, State_fips, CountyName, STATE_COUNTY_FIP, Score_total)
+}
+
+# Extract hotspot FIPS from two sf threshold layers
+hotspot_fips <- function(sf_20pc, sf_10pc) {
+  bind_rows(
+    sf_20pc %>% st_drop_geometry() %>% distinct(STATE_COUNTY_FIP),
+    sf_10pc %>% st_drop_geometry() %>% distinct(STATE_COUNTY_FIP)
+  ) %>% distinct(STATE_COUNTY_FIP) %>% pull(STATE_COUNTY_FIP)
+}
+
+# Extract hotspot FIPS restricted to a bounding box
+hotspot_fips_bbox <- function(sf_nearby, xmin, xmax, ymin, ymax) {
+  bbox_poly <- st_as_sfc(st_bbox(c(xmin = xmin, xmax = xmax,
+                                    ymin = ymin, ymax = ymax),
+                                  crs = st_crs(4326))) %>%
+    st_transform(st_crs(sf_nearby))
+  sf_nearby %>%
+    st_filter(bbox_poly) %>%
+    st_drop_geometry() %>%
+    distinct(STATE_COUNTY_FIP) %>%
+    pull(STATE_COUNTY_FIP)
+}
+
+# sf subsets: inactivity hotspot counties that have a facility within 10 miles
+inact_with_battery <- inactive_states_20pc[has_battery, ]
+inact_with_solar   <- inactive_states_20pc[has_solar,   ]
+
+sheet1_earnings   <- make_sheet(hotspot_fips(earnings_states_20pc, earnings_states_10pc), earnings_cl)
+sheet2_inactivity <- make_sheet(hotspot_fips(inactive_states_20pc, inactive_states_10pc), inactive)
+
+sheet3_battery_rb <- make_sheet(hotspot_fips_bbox(inact_with_battery, -92.0, -74.5, 36.5, 47.5), inactive)
+sheet4_solar_rb   <- make_sheet(hotspot_fips_bbox(inact_with_solar,   -92.0, -74.5, 36.5, 47.5), inactive)
+
+sheet5_battery_s  <- make_sheet(hotspot_fips_bbox(inact_with_battery, -97.5, -85.5, 28.5, 35.5), inactive)
+sheet6_solar_s    <- make_sheet(hotspot_fips_bbox(inact_with_solar,   -97.5, -85.5, 28.5, 35.5), inactive)
+
+sheet7_utah       <- make_sheet(hotspot_fips_bbox(inact_with_battery, -114.1, -109.0, 36.9, 42.0), inactive)
+
+writexl::write_xlsx(
+  list(
+    "Earnings hotspots"          = sheet1_earnings,
+    "Inactivity hotspots"        = sheet2_inactivity,
+    "Battery overlay Rust Belt"  = sheet3_battery_rb,
+    "Solar overlay Rust Belt"    = sheet4_solar_rb,
+    "Battery overlay South"      = sheet5_battery_s,
+    "Solar overlay South"        = sheet6_solar_s,
+    "Utah hotspots"              = sheet7_utah
+  ),
+  "out/validation/county_lists_by_map.xlsx"
+)
+cat("County lists exported to out/validation/county_lists_by_map.xlsx\n")
+```
+
+---
+
+## 9. Validation: Earnings Hotspot Sheet Row Count
+
+```{r earnings-sheet-validation}
+n_map_counties  <- length(hotspot_fips(earnings_states_20pc, earnings_states_10pc))
+n_sheet_rows    <- nrow(sheet1_earnings)
+match_flag      <- ifelse(n_map_counties == n_sheet_rows, "PASS", "FAIL")
+
+cat(sprintf("Counties visible in earnings_tract_county_10pc_20pc map : %d\n", n_map_counties))
+cat(sprintf("Rows in 'Earnings hotspots' Excel sheet                 : %d\n", n_sheet_rows))
+cat(sprintf("Match check                                              : %s\n", match_flag))
+
+if (n_map_counties != n_sheet_rows) {
+  missing <- setdiff(
+    hotspot_fips(earnings_states_20pc, earnings_states_10pc),
+    sheet1_earnings$STATE_COUNTY_FIP
+  )
+  extra <- setdiff(
+    sheet1_earnings$STATE_COUNTY_FIP,
+    hotspot_fips(earnings_states_20pc, earnings_states_10pc)
+  )
+  if (length(missing) > 0)
+    cat("  Counties in map but missing from sheet:", paste(missing, collapse = ", "), "\n")
+  if (length(extra) > 0)
+    cat("  Counties in sheet but not in map:", paste(extra, collapse = ", "), "\n")
+}
+```
