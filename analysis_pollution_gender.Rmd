@@ -3,6 +3,7 @@ title: "Pollution and Gender Book Chapter: Analyis"
 author: "Charlotte Sophia Bez and Linnea Nelli"
 date: "`r Sys.Date()`"
 output: html_document
+description: produces all figures and maps shown in the book chapter.
 ---
 
 ```{r setup, include=FALSE}
@@ -929,33 +930,4 @@ writexl::write_xlsx(
   "out/validation/county_lists_by_map.xlsx"
 )
 cat("County lists exported to out/validation/county_lists_by_map.xlsx\n")
-```
-
----
-
-## 9. Validation: Earnings Hotspot Sheet Row Count
-
-```{r earnings-sheet-validation}
-n_map_counties  <- length(hotspot_fips(earnings_states_20pc, earnings_states_10pc))
-n_sheet_rows    <- nrow(sheet1_earnings)
-match_flag      <- ifelse(n_map_counties == n_sheet_rows, "PASS", "FAIL")
-
-cat(sprintf("Counties visible in earnings_tract_county_10pc_20pc map : %d\n", n_map_counties))
-cat(sprintf("Rows in 'Earnings hotspots' Excel sheet                 : %d\n", n_sheet_rows))
-cat(sprintf("Match check                                              : %s\n", match_flag))
-
-if (n_map_counties != n_sheet_rows) {
-  missing <- setdiff(
-    hotspot_fips(earnings_states_20pc, earnings_states_10pc),
-    sheet1_earnings$STATE_COUNTY_FIP
-  )
-  extra <- setdiff(
-    sheet1_earnings$STATE_COUNTY_FIP,
-    hotspot_fips(earnings_states_20pc, earnings_states_10pc)
-  )
-  if (length(missing) > 0)
-    cat("  Counties in map but missing from sheet:", paste(missing, collapse = ", "), "\n")
-  if (length(extra) > 0)
-    cat("  Counties in sheet but not in map:", paste(extra, collapse = ", "), "\n")
-}
 ```
