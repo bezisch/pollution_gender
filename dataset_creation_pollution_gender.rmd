@@ -1,0 +1,1341 @@
+---
+title: "Pollution and Gender Book Chapter: Dataset Creation"
+author: "Charlotte Sophia Bez and Linnea Nelli"
+date: "`r Sys.Date()`"
+output: html_document
+description: builds all input datasets used in the analysis.
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, message = FALSE, warning = FALSE,
+                      fig.width = 14, fig.height = 8)
+
+setwd("C:\\Users\\charlott\\Dropbox (Personal)\\Book_Chapters\\Toxic_Pollution_Feminized_Labor")
+
+library(readxl)
+library(dplyr)
+library(here)
+library(tidyverse)
+library(janitor)
+library(tidycensus)
+library(tigris)
+library(sp)
+library(sf)
+library(biscale)
+library(ggplot2)
+library(cowplot)
+library(purrr)
+library(writexl)
+```
+
+---
+
+## RSEI Tract-Level Data Preparation
+
+Download 2022 aggregated US census tract-level results which Cindy (EPA subcontractor) sent me.
+
+- https://www.epa.gov/rsei/ways-get-rsei-results#microdata
+- Documentation: https://www.epa.gov/system/files/documents/2024-08/rsei-documentation-geographic-microdata-august-2024.pdf
+- Old versions: https://github.com/ianamunoz/tri_map/tree/master/data (Environmental Research Letters: Linking 'toxic outliers' to environmental justice communities)
+- https://www.census.gov/geographies/reference-files/time-series/geo/gazetteer-files.2022.html#list-tab-264479560
+
+```{python}
+import os
+import numpy as np
+from sklearn.cluster import KMeans
+import glob
+import matplotlib.pyplot as plt
+import seaborn as sns
+from matplotlib.backends.backend_pdf import PdfPages
+import pandas as pd
+```
+
+```{python}
+path = r"C:\Users\charlott\Dropbox (Personal)\Book_Chapters\Toxic_Pollution_Feminized_Labor"
+files = glob.glob(os.path.join(path, "*.csv"))
+print(files)
+# Score → RSEI Score (toxicity × fate × population)
+# ToxConc → toxicity-weighted concentration aka Concentration multiplied by inhalation toxicity weight.
+```
+
+```{python}
+file_path = files[0]
+df_2022 = pd.read_csv(file_path, compression="gzip")
+print(df_2022.head())
+
+# e g 22017022500 is a Census Tract GEOID, always 11 digits like SSCCCTTTTTT
+# where the CCC correspond to the county.
+# hence : GEOID[:2]   → state FIPS, GEOID[2:5]  → county FIPS, GEOID[5:]   → tract code
+
+print("Loaded file:", file_path)
+```
+
+```{python}
+print(df_2022[['GeoID', 'Pop']].head(3))
+```
+
+For census tracts, land area does not change over time unless there is a boundary revision. We implicitly assume 2022 tract boundaries for all years.
+
+```{python}
+folder = r"C:\Users\charlott\Dropbox (Personal)\Book_Chapters\Toxic_Pollution_Feminized_Labor\2022_Gaz_tracts_national"
+
+file_path = os.path.join(folder, os.listdir(folder)[0])
+gazetteer = pd.read_csv(file_path, delimiter='\t')
+
+print(gazetteer.columns)
+print(gazetteer['GEOID'].head(5))
+gazetteer.rename(columns={'GEOID': 'GeoID'}, inplace=True)
+```
+
+```{python}
+df_2022['GeoID'] = df_2022['GeoID'].astype(str)
+gazetteer['GeoID'] = gazetteer['GeoID'].astype(str)
+
+overlap = df_2022['GeoID'].isin(gazetteer['GeoID'])
+print("Number of matching GeoIDs:", overlap.sum())
+print("Number of non-matching GeoIDs:", (~overlap).sum())
+
+print("Example matches:", df_2022.loc[overlap, 'GeoID'].head(10).tolist())
+print("Example non-matches:", df_2022.loc[~overlap, 'GeoID'].head(10).tolist())
+```
+
+```{python}
+gaz_cols_to_add = [col for col in gazetteer.columns if col not in df_2022.columns and col != 'GeoID']
+merged_df = df_2022.merge(gazetteer[['GeoID'] + gaz_cols_to_add], on='GeoID', how='left')
+print(merged_df.shape)
+print(merged_df.columns)
+```
+
+As of 2022, there are 3,144 counties and county-equivalents in the 50 U.S. states and the District of Columbia.
+
+```{python}
+# Ensure GeoID is string
+merged_df['GeoID'] = merged_df['GeoID'].astype(str)
+
+# Pad GeoID to 11 digits with leading zeros
+merged_df['GeoID'] = merged_df['GeoID'].str.zfill(11)
+
+# Extract FIPS codes
+merged_df['State_fips'] = merged_df['GeoID'].str[:2]
+merged_df['County_fips'] = merged_df['GeoID'].str[:5]
+
+# Verify
+print(merged_df[['GeoID', 'State_fips', 'County_fips']].head(10))
+```
+
+```{python}
+distinct_states = merged_df['State_fips'].nunique()
+print("Number of distinct state FIPS codes:", distinct_states)
+print("Distinct state FIPS codes:", merged_df['State_fips'].value_counts().sort_values().index.tolist())
+```
+
+```{python}
+ny_counties = merged_df[merged_df['County_fips'].str.startswith("36")]['County_fips']
+
+num_ny_counties = ny_counties.nunique()
+print("Number of distinct counties in New York (FIPS 36):", num_ny_counties)
+
+print("County FIPS codes in NY:", ny_counties.unique())
+# this was just a check - all good
+```
+
+```{python}
+ny_counties = merged_df[merged_df['County_fips'].str.startswith("01")]['County_fips']
+
+num_ny_counties = ny_counties.nunique()
+print("Number of distinct counties in Alabama (FIPS 01):", num_ny_counties)
+
+print("County FIPS codes in Alabama:", ny_counties.unique())
+# this was just a check - all good
+```
+
+```{python}
+ny_counties = merged_df[merged_df['County_fips'].str.startswith("04")]['County_fips']
+
+num_ny_counties = ny_counties.nunique()
+print("Number of distinct counties in Arizona (FIPS 04):", num_ny_counties)
+
+print("County FIPS codes in Arizona:", ny_counties.unique())
+# this was just a check - all good
+```
+
+```{python}
+# Calculate total area in square miles
+merged_df['TOTAL_AREA_SQMI'] = merged_df['ALAND_SQMI'] + merged_df['AWATER_SQMI']
+print(merged_df[['GeoID', 'ALAND_SQMI', 'AWATER_SQMI', 'TOTAL_AREA_SQMI']].head())
+```
+
+```{python}
+print(merged_df.columns)
+```
+
+```{python}
+tract_df = merged_df.copy()
+
+# Rename for consistency with county output schema
+tract_df = tract_df.rename(columns={
+    'CancToxConc':    'CancToxConc_mean',     # already tract-level, no weighting needed
+    'NonCancToxConc': 'NonCancToxConc_mean',
+    'ToxConc':        'ToxConc_mean',
+})
+
+# Totals: at tract level these are identical to the mean values
+# but we keep them for schema consistency with the county table
+tract_df['Score_total']        = tract_df['Score']
+tract_df['CancToxConc_total']  = tract_df['CancToxConc_mean']
+tract_df['NonCancToxConc_total'] = tract_df['NonCancToxConc_mean']
+tract_df['ToxConc_total']      = tract_df['ToxConc_mean']
+
+# Select and reorder to match county output schema
+tract_level = tract_df[[
+    'GeoID',            # tract identifier — add this
+    'County_fips',      # so you can still join to county table if needed
+    'State_fips',
+    'Pop',
+    'NumFacs',
+    'NumReleases',
+    'NumChems',
+    'CancToxConc_mean',
+    'NonCancToxConc_mean',
+    'ToxConc_mean',
+    'Score_total',
+    'CancToxConc_total',
+    'NonCancToxConc_total',
+    'ToxConc_total',
+    'TOTAL_AREA_SQMI',
+]].copy()
+```
+
+```{python}
+tract_level['ToxConc_per_capita']   = tract_level['ToxConc_total'] / tract_level['Pop']
+tract_level['Score_per_sqmi']       = tract_level['Score_total']   / tract_level['TOTAL_AREA_SQMI']
+```
+
+```{python}
+print(tract_level.shape)
+```
+
+```{python}
+print(tract_level['State_fips'].unique()[:56])
+```
+
+```{python}
+# select GeoIDs starting with Fresno County: 06019
+fresno_geoids = tract_level[tract_level['GeoID'].astype(str).str.startswith('06019')]
+
+# check result
+print(fresno_geoids[['County_fips', 'Pop']].head(15))
+```
+
+Now add variable on county names from external source.
+
+```{python}
+import pandas as pd
+import requests
+
+# Download
+url = "https://transition.fcc.gov/oet/info/maps/census/fips/fips.txt"
+r = requests.get(url)
+r.raise_for_status()
+text = r.text
+
+lines = text.splitlines()
+data = []
+start = False
+
+for line in lines:
+    if not line.strip():
+        continue  # skip empty lines
+
+    tokens = line.strip().split()  # split by any whitespace
+    if len(tokens) < 2:
+        continue  # skip malformed lines
+
+    fips_candidate = tokens[0]
+
+    # Start collecting from the first FIPS code "01001"
+    if fips_candidate == "01001":
+        start = True
+
+    if start:
+        fips = fips_candidate
+        name = " ".join(tokens[1:])  # everything after FIPS = county name
+        data.append((fips, name))
+
+# Convert to DataFrame
+fips_df = pd.DataFrame(data, columns=['County_fips', 'CountyName'])
+
+# Check
+print(f"Number of rows: {len(fips_df)}")
+print(fips_df.head(10))
+```
+
+```{python}
+# Make a copy to avoid modifying the original
+tract_clean = tract_level.copy()
+
+# Drop existing CountyName to avoid duplicate column error
+if 'CountyName' in tract_clean.columns:
+    tract_clean = tract_clean.drop(columns=['CountyName'])
+
+# Merge county names onto tracts via County_fips
+merged_df = tract_clean.merge(
+    fips_df,
+    on='County_fips',
+    how='left'
+)
+
+num_matched = merged_df['CountyName'].notna().sum()
+num_unmatched = merged_df['CountyName'].isna().sum()
+print(f"Matched tracts: {num_matched}")
+print(f"Unmatched tracts: {num_unmatched}")
+unmatched_examples = merged_df.loc[merged_df['CountyName'].isna(), 'County_fips'].head(5)
+print("Unmatched County_fips examples:", unmatched_examples.tolist())
+```
+
+```{python}
+# -----------------------------
+# Codebook for tract_level
+# -----------------------------
+codebook = {
+    'GeoID':               'Census tract identifier (11-digit FIPS)',
+    'County_fips':         'FIPS code of the county the tract belongs to',
+    'State_fips':          'FIPS code of the state',
+    'Pop':                 'Total population in the census tract (2022 data)',
+    'NumFacs':             'Total number of facilities in the census tract',
+    'NumReleases':         'Total number of chemical releases in the census tract',
+    'NumChems':            'Total number of different chemicals released in the census tract',
+    'CancToxConc_mean':    'Cancer toxicity concentration at tract level (µg/m3 × inhalation toxicity weight)',
+    'NonCancToxConc_mean': 'Non-cancer toxicity concentration at tract level (µg/m3 × inhalation toxicity weight)',
+    'ToxConc_mean':        'Total toxicity concentration at tract level (µg/m3 × inhalation toxicity weight)',
+    'Score_total':         'Risk score for the tract (dose × toxicity weight × potentially exposed population)',
+    'CancToxConc_total':   'Same as CancToxConc_mean at tract level (no further aggregation)',
+    'NonCancToxConc_total':'Same as NonCancToxConc_mean at tract level (no further aggregation)',
+    'ToxConc_total':       'Same as ToxConc_mean at tract level (no further aggregation)',
+    'TOTAL_AREA_SQMI':     'Total area of the census tract in square miles (2022 data)',
+    'ToxConc_per_capita':  'ToxConc_total divided by tract population',
+    'Score_per_sqmi':      'Score_total divided by tract area in square miles',
+}
+
+codebook_df = pd.DataFrame({
+    'Variable': list(codebook.keys()),
+    'Definition': list(codebook.values())
+})
+
+cols_to_drop = ['CountyName_x', 'StateAbbr', 'CountyName_y']
+merged_df = merged_df.drop(columns=[c for c in cols_to_drop if c in merged_df.columns])
+merged_df = merged_df.drop_duplicates()
+
+# Sort hierarchically: state → county → tract
+merged_df = merged_df.sort_values(
+    ['State_fips', 'County_fips', 'GeoID'],
+    ascending=True
+).reset_index(drop=True)
+
+# Export tract data + codebook to Excel
+with pd.ExcelWriter("pollution_tract_22.xlsx") as writer:
+    merged_df.to_excel(writer, sheet_name="Tract_Level", index=False)
+    codebook_df.to_excel(writer, sheet_name="Codebook", index=False)
+```
+
+```{python}
+plt.figure(figsize=(16,6))
+sns.stripplot(
+    x='State_fips',
+    y='Score_total',
+    data=tract_level,
+    jitter=True,
+    alpha=0.4,
+    size=3
+)
+plt.title("Total Risk Score per Census Tract by State")
+plt.xlabel("State FIPS")
+plt.ylabel("Score_total (risk)")
+plt.xticks(rotation=90)
+plt.tight_layout()
+plt.show()
+```
+
+```{python}
+import numpy as np
+
+state_fips_to_abbr = {
+    '01': 'AL', '02': 'AK', '04': 'AZ', '05': 'AR', '06': 'CA',
+    '08': 'CO', '09': 'CT', '10': 'DE', '11': 'DC', '12': 'FL',
+    '13': 'GA', '15': 'HI', '16': 'ID', '17': 'IL', '18': 'IN',
+    '19': 'IA', '20': 'KS', '21': 'KY', '22': 'LA', '23': 'ME',
+    '24': 'MD', '25': 'MA', '26': 'MI', '27': 'MN', '28': 'MS',
+    '29': 'MO', '30': 'MT', '31': 'NE', '32': 'NV', '33': 'NH',
+    '34': 'NJ', '35': 'NM', '36': 'NY', '37': 'NC', '38': 'ND',
+    '39': 'OH', '40': 'OK', '41': 'OR', '42': 'PA', '44': 'RI',
+    '45': 'SC', '46': 'SD', '47': 'TN', '48': 'TX', '49': 'UT',
+    '50': 'VT', '51': 'VA', '53': 'WA', '54': 'WV', '55': 'WI',
+    '56': 'WY', '60': 'AS', '66': 'GU', '69': 'MP', '72': 'PR', '78': 'VI'
+}
+
+tract_plot = tract_level.copy()
+tract_plot['log_Score_total'] = np.log1p(tract_plot['Score_total'])
+tract_plot['State'] = tract_plot['State_fips'].map(state_fips_to_abbr).fillna(tract_plot['State_fips'])
+
+plt.figure(figsize=(16,6))
+sns.stripplot(
+    x='State',
+    y='log_Score_total',
+    data=tract_plot,
+    order=sorted(tract_plot['State'].unique()),
+    jitter=True,
+    alpha=0.3,
+    size=3,
+    palette='Oranges'
+)
+plt.title("log(Total Risk Score + 1) per Census Tract by State")
+plt.xlabel("State")
+plt.ylabel("log(Score_total + 1)")
+plt.xticks(rotation=90)
+plt.tight_layout()
+plt.show()
+```
+
+Even on a log scale, toxic risk scores vary considerably across and within states: most tracts cluster near the bottom of the distribution, but a handful of tracts in industrially intensive states — particularly in the South and Midwest (e.g., TX, LA, IN, OH) — stand out as extreme high-risk outliers. The wide within-state spread visible in larger states reflects the uneven geographic concentration of polluting facilities, where a single tract near an industrial complex can drive the state's upper tail. This pattern suggests that state-level or county-level averages obscure sharp local inequalities in toxic burden at the neighborhood level.
+
+```{python}
+# At tract level, _mean and _total are identical (see cell 18).
+# We plot the unique measures: CancToxConc, NonCancToxConc, ToxConc, and Score.
+plot_cols = ['CancToxConc_mean', 'NonCancToxConc_mean', 'ToxConc_mean', 'Score_total']
+short_labels = ['CancToxConc', 'NonCancToxConc', 'ToxConc', 'Score']
+
+tract_log = tract_level.copy()
+for col in plot_cols:
+    tract_log[col] = np.log1p(tract_log[col])
+
+melt_df = tract_log.melt(
+    id_vars=['GeoID', 'State_fips'],
+    value_vars=plot_cols,
+    var_name='Variable',
+    value_name='Value'
+)
+melt_df['Measure'] = melt_df['Variable'].map(dict(zip(plot_cols, short_labels)))
+
+plt.figure(figsize=(12, 6))
+sns.violinplot(
+    x='Measure',
+    y='Value',
+    data=melt_df,
+    inner='quartile',
+    palette='Set2'
+)
+plt.title("Distribution of log(Toxicity Measures) across Census Tracts")
+plt.ylabel("log(value + 1)")
+plt.xlabel("Measure")
+plt.tight_layout()
+plt.show()
+```
+
+```{python}
+import numpy as np
+
+# At tract level _mean == _total by construction, so we correlate the 4 distinct measures
+plot_cols  = ['CancToxConc_mean', 'NonCancToxConc_mean', 'ToxConc_mean', 'Score_total']
+short_labels = ['CancToxConc', 'NonCancToxConc', 'ToxConc', 'Score']
+
+log_data = np.log1p(tract_level[plot_cols].rename(columns=dict(zip(plot_cols, short_labels))))
+corr = log_data.corr()
+
+plt.style.use('seaborn-v0_8-white')
+fig, ax = plt.subplots(figsize=(7, 6))
+
+sns.heatmap(
+    corr,
+    ax=ax,
+    annot=True,
+    fmt='.2f',
+    cmap='YlOrRd',
+    vmin=0.7, vmax=1.0,
+    linewidths=0.5,
+    linecolor='white',
+    annot_kws={'size': 12, 'weight': 'bold'},
+    cbar_kws={'shrink': 0.8, 'label': 'Pearson r (log scale)'}
+)
+
+ax.set_title('Pairwise Correlations across Census Tracts (log scale)',
+             fontsize=13, fontweight='bold', pad=14)
+ax.tick_params(axis='x', rotation=30, labelsize=10)
+ax.tick_params(axis='y', rotation=0, labelsize=10)
+
+plt.tight_layout()
+plt.show()
+```
+
+**Heatmap summary.** Among the *mean* measures, cancer and total toxicity concentrations are nearly interchangeable (r = 0.98), while non-cancer toxicity is more loosely related to both (r = 0.74 and r = 0.82). This suggests that cancer-risk chemicals dominate the overall mean exposure signal, with non-cancer pathways capturing a somewhat distinct dimension. Among the *total* measures, all four variables are highly correlated (r ≥ 0.85), with `ToxConc_total` and `Score_total` being almost perfectly aligned (r = 0.99), indicating that once you aggregate across all chemicals and weight by population, cancer and non-cancer risks converge. The notably weaker correlation of non-cancer with cancer in the mean measures (0.74) versus the total measures (0.85) suggests that county size partially smooths out differences in chemical composition.
+
+```{python}
+cap = tract_level['Score_total'].quantile(0.98)
+score_trimmed = tract_level['Score_total'][tract_level['Score_total'] <= cap].dropna()
+score_log = np.log1p(score_trimmed)
+
+plt.style.use('seaborn-v0_8-whitegrid')
+fig, ax = plt.subplots(figsize=(10, 5))
+
+score_log.plot.kde(ax=ax, color='#E07B39', linewidth=2.5)
+ax.fill_between(
+    ax.lines[0].get_xdata(),
+    ax.lines[0].get_ydata(),
+    alpha=0.15, color='#E07B39'
+)
+
+ax.set_xlabel('log(Score_total + 1)', fontsize=12, labelpad=10)
+ax.set_ylabel('Density', fontsize=12, labelpad=10)
+ax.set_title('Distribution of log(Total Risk Score) across Census Tracts',
+             fontsize=14, fontweight='bold', pad=15)
+ax.spines['top'].set_visible(False)
+ax.spines['right'].set_visible(False)
+ax.tick_params(labelsize=10)
+
+plt.tight_layout()
+plt.show()
+
+skew_log = score_log.skew()
+print(f"Skewness after log transform: {skew_log:.2f}")
+if abs(skew_log) <= 0.5:
+    print("The log-transformed distribution is approximately symmetric.")
+elif skew_log > 0.5:
+    print(f"Still right-skewed after log transform (skewness = {skew_log:.2f}).")
+else:
+    print(f"Left-skewed after log transform (skewness = {skew_log:.2f}).")
+```
+
+```{python}
+print("Top 5% tracts by Score_total:\n")
+
+threshold = merged_df['Score_total'].quantile(0.95)
+top_tracts = merged_df[merged_df['Score_total'] >= threshold].copy()
+top_tracts['StateAbbr'] = top_tracts['State_fips'].map(state_fips_to_abbr)
+top_tracts['Label'] = top_tracts.apply(
+    lambda r: f"{r['CountyName']}, {r['StateAbbr']}" if pd.notna(r['CountyName'])
+              else f"FIPS {r['County_fips']}, {r['StateAbbr']}",
+    axis=1
+)
+top_tracts_sorted = top_tracts.sort_values('Score_total', ascending=False)
+
+for _, row in top_tracts_sorted.iterrows():
+    print(f"  Tract {row['GeoID']}  ({row['Label']:40s})  Score = {row['Score_total']:,.0f}")
+```
+
+**Top 5% counties by total risk score — interpretation.**
+
+Three macro-geographic clusters stand out:
+
+1. **Texas Gulf Coast / petrochemical corridor.** Harris (Houston), Jefferson (Beaumont–Port Arthur), Galveston, Orange, Brazoria, and Montgomery counties are all within or adjacent to the Houston Ship Channel, the densest concentration of oil refineries, chemical plants, and plastics manufacturing in the United States. Harris County alone scores nearly twice as high as the second-ranked county (Cook, IL), reflecting both the sheer scale of industrial activity and the large exposed population in the Houston metro.
+
+2. **Louisiana "Cancer Alley."** East Baton Rouge, Calcasieu (Lake Charles), Ascension, St. John the Baptist, St. Charles, and Jefferson parishes map directly onto the stretch of the Mississippi River between Baton Rouge and New Orleans — a corridor long documented for its exceptional concentration of petrochemical and chlorine-chemistry facilities, and disproportionate exposure of low-income Black communities.
+
+3. **Industrial Midwest.** Indiana (Vanderburgh, Warrick, Lake, Elkhart), Ohio (Hamilton, Cuyahoga, Butler, Lorain, Erie, Allen), and Pennsylvania (Lancaster, Berks, York, Chester) reflect the legacy steel, aluminum, automotive, and chemical manufacturing belt. Several of these are relatively small counties (e.g., Warrick IN — home to a major Alcoa aluminum smelter; Henderson KY; Platte NE) whose high scores are driven by a single large facility rather than a broad industrial base, making them cases where *pollution intensity* rather than *population size* drives the ranking.
+
+**Population size and score.** The top-ranked counties (Harris TX, Cook IL, Los Angeles CA, King WA) are among the most populous in the country, so their high scores partly reflect the number of people exposed rather than unusually severe per-capita contamination. Mid-list counties like Gila AZ (copper mining), Newton GA (heavy manufacturing), Wyandotte KS, and Goodhue MN are far smaller and likely host one or two dominant polluters — a pattern worth distinguishing analytically from large-city exposure. Bayamón PR (FIPS 72011) stands out as the only territory in the list, driven by pharmaceutical manufacturing concentrated on the island (remove islands?)
+
+```{python}
+print("Top 2% tracts by ToxConc_total:\n")
+
+threshold = merged_df['ToxConc_total'].quantile(0.98)
+top_tracts = merged_df[merged_df['ToxConc_total'] >= threshold].copy()
+top_tracts['StateAbbr'] = top_tracts['State_fips'].map(state_fips_to_abbr)
+top_tracts['Label'] = top_tracts.apply(
+    lambda r: f"{r['CountyName']}, {r['StateAbbr']}" if pd.notna(r['CountyName'])
+              else f"FIPS {r['County_fips']}, {r['StateAbbr']}",
+    axis=1
+)
+top_tracts_sorted = top_tracts.sort_values('ToxConc_total', ascending=False)
+
+for _, row in top_tracts_sorted.iterrows():
+    print(f"  Tract {row['GeoID']}  ({row['Label']:40s})  ToxConc_total = {row['ToxConc_total']:,.0f}")
+```
+
+**Score_total vs. ToxConc_total**
+
+The two rankings overlap substantially but diverge in revealing ways. `Score_total` weights toxicity by the number of people potentially exposed, so it is a measure of *population burden*. `ToxConc_total` is the raw sum of toxicity concentrations across a county, irrespective of how many people live there; it is a measure of *industrial intensity*.
+
+**Counties that rise in ToxConc_total (more toxic than their population-weighted score suggests):**
+- **Jefferson County, TX** (Beaumont–Port Arthur) jumps from rank 4 to rank 3, and the gap with Harris County nearly halves. This confirms it as one of the most industrially concentrated petrochemical zones in the country, not just large in population.
+- **Wyandotte County, KS**, **Vanderburgh County, IN**, and **Warrick County, IN** all hold or improve their positions, suggesting high raw chemical loads relative to their population — likely driven by a small number of very large facilities.
+- **Jackson County, MO**, **Tulsa County, OK**, **Franklin County, OH**, and **Milwaukee County, WI** appear in the ToxConc_total top 2% but are lower or absent in the Score_total top: high industrial output, moderate population.
+
+**Counties that fall in ToxConc_total (their Score_total rank is inflated by population size):**
+- **Lancaster County, PA** drops from rank 5 to rank 10, and **Washoe County, NV** from rank 6 to rank 11. Both are sizable counties where a large exposed population amplifies the score beyond what their raw industrial footprint would warrant.
+- **Washington County, AR** (#18 in Score_total) disappears entirely from ToxConc_total top 2% — its ranking is largely a function of population growth (it is the fast-growing Fayetteville–Springdale metro), not exceptional pollution intensity.
+- **Salt Lake County, UT** similarly drops out, reflecting a large urban population rather than extreme industrial concentration.
+
+**Takeaway.** The choice of measure matters analytically but wont overall change the results much. `Score_total` is the right variable when the research question concerns *how many people are at risk*. `ToxConc_total` (or mean measures) is preferable when the question concerns *where pollution is most intense*, regardless of who lives nearby.
+
+```{python}
+# where did calhoun country go? apparently did not match when matching with fips, but did so before doing changes. have to find out still.
+```
+
+---
+
+## 2. ACS Tract-Level Dataset
+
+Retrieves employment status, earnings, hours worked, industry, household structure, and education from the 5-year ACS (2022) at census-tract level. All variables are merged with the RSEI toxicity data to produce the final analysis dataset `acs_2022.csv`.
+
+```{r acs-setup}
+
+rm(list=ls())
+
+options(tigris_use_cache = TRUE)
+options(width=400)
+options(tibble.width=Inf)
+options(rlang_backtrace_on_error = "none")
+
+census_api_key("a151c4ceceb35c7724815204e94a40970f250bb5")
+
+library(readxl)
+library(dplyr)
+
+toxicity_2022 <- read_excel("pollution_tract_22.xlsx")
+
+#remove Guam, Virgin Islands, Mariana Islands, Samoa
+
+states_poll <- toxicity_2022 %>% 
+  distinct(State_fips) %>% 
+  filter(!(State_fips %in% c("60","66","69","78")))
+
+states_poll <- as.vector(unique(states_poll$State_fips))
+
+length(unique(states_poll)) #52
+
+#The ACS5 does not have the 65,000 population limit as the ACS1
+
+variables_2022 <- load_variables(2022, "acs5") %>% 
+  filter(geography=="tract")
+
+write.csv(in/variables_2022, "variables_2022.csv")
+
+
+#It takes too long to retrieve data for all variables all together, we retrieve tract data by variable 
+
+#EMPLOYMENT STATUS ------
+
+#"Sex by Age by Employment Status for the Population 16 Years and Over"
+
+###Dataset ----
+
+empl_status <- variables_2022 %>% 
+  filter(grepl("Sex by Age by Employment Status for the Population 16 Years and Over", concept),
+         label %in% c("Estimate!!Total:", 
+                      "Estimate!!Total:!!Male:", 
+                      "Estimate!!Total:!!Female:",
+                      "Estimate!!Total:!!Female:!!16 to 64 years:!!In labor force:!!Civilian:!!Employed",
+                      "Estimate!!Total:!!Male:!!16 to 64 years:!!In labor force:!!Civilian:!!Employed",
+                      "Estimate!!Total:!!Male:!!16 to 64 years:!!In labor force:!!Civilian:!!Unemployed",
+                      "Estimate!!Total:!!Female:!!16 to 64 years:!!In labor force:!!Civilian:!!Unemployed",
+                      "Estimate!!Total:!!Female:!!16 to 64 years:!!Not in labor force",
+                      "Estimate!!Total:!!Male:!!16 to 64 years:!!Not in labor force"
+         )) %>% 
+  filter(
+    # Condition A: Specific "Totals" ONLY for the main concept
+    (label %in% c("Estimate!!Total:", 
+                  "Estimate!!Total:!!Male:", 
+                  "Estimate!!Total:!!Female:") & 
+       concept == "Sex by Age by Employment Status for the Population 16 Years and Over") |
+      
+      # Condition B: Keep everything else in your list regardless of the specific concept variation
+      (label %in% c("Estimate!!Total:!!Female:!!16 to 64 years:!!In labor force:!!Civilian:!!Employed",
+                    "Estimate!!Total:!!Male:!!16 to 64 years:!!In labor force:!!Civilian:!!Employed",
+                    "Estimate!!Total:!!Male:!!16 to 64 years:!!In labor force:!!Civilian:!!Unemployed",
+                    "Estimate!!Total:!!Female:!!16 to 64 years:!!In labor force:!!Civilian:!!Unemployed",
+                    "Estimate!!Total:!!Female:!!16 to 64 years:!!Not in labor force",
+                    "Estimate!!Total:!!Male:!!16 to 64 years:!!Not in labor force"))
+  )
+
+var_empl_status <- as.vector(unique(empl_status$name))
+
+empl_2022 <- get_acs(geography = "tract",
+                     variables = var_empl_status,
+                     year= 2022, 
+                     #output = "wide",
+                     geometry = FALSE, 
+                     state=states_poll,
+                     keep_geo_vars = TRUE,
+                     #key = "a151c4ceceb35c7724815204e94a40970f250bb5",
+                     survey = "acs5"
+) 
+
+length(unique(empl_2022$GEOID)) #85396
+
+#retrieve the definitions (column concept) of the variables (column name) - the ACS provides only the name column 
+
+empl_concept <- variables_2022 %>% 
+  distinct(name, label, concept) %>% 
+  inner_join(empl_2022, by=c("name"="variable")) %>% 
+  mutate(STATE_COUNTY_FIP = substr(GEOID, start=1, stop=5)) %>% 
+  rename("TRACT_COUNTY_STATE_NAME"="NAME") %>% 
+  arrange(GEOID)
+
+length(unique(empl_concept$STATE_COUNTY_FIP)) #3222
+
+unique(empl_concept$concept)
+unique(empl_concept$label)
+
+#Group quarter population to control for jails, nurse and college residents.
+#(we had observations with 4 women employed in manufacturing over a total workforce opulation of 4, 
+#share of 1 biassing the distribution)
+
+group_quart <- get_acs(geography = "tract",
+                       variables = "B26001_001",
+                       year= 2022, 
+                       #output = "wide",
+                       geometry = FALSE, 
+                       state=states_poll,
+                       keep_geo_vars = TRUE,
+                       #key = "a151c4ceceb35c7724815204e94a40970f250bb5",
+                       survey = "acs5"
+) 
+
+###### Poupulation -----
+
+population <-  empl_concept %>%
+  # 1. Standardize labels
+  mutate(pop = case_when(
+    
+    label == "Estimate!!Total:" ~ "Total", 
+    label == "Estimate!!Total:!!Male:" ~ "Total_Male",
+    label == "Estimate!!Total:!!Female:" ~ "Total_Female",
+    TRUE~NA_character_)) %>% 
+  na.omit() %>% 
+  distinct(GEOID, STATE_COUNTY_FIP, pop,estimate) %>% 
+  pivot_wider(names_from = pop, values_from = estimate) 
+
+###### Employment Status -----
+
+
+empl_stat <- empl_concept %>%
+  filter(!(label %in% c("Estimate!!Total:",
+                        "Estimate!!Total:!!Male:",
+                        "Estimate!!Total:!!Female:")),
+         grepl("C23002[A-G]", name)) %>% #Hispanic and Latino are included in other categorie (race vs etnicity) 
+  mutate(cat = case_when(
+    grepl("Employed$", label) ~ "Employed",
+    grepl("Unemployed$", label) ~ "Unemployed",
+    grepl("Not in labor force$", label) ~ "Inactive",
+    TRUE ~ NA_character_),
+    gender = case_when(
+      grepl("Male", label) ~ "_M",
+      grepl("Female", label) ~ "_F",
+      TRUE ~ NA_character_),
+    empl_key = paste0(cat, gender)) %>% 
+  group_by(GEOID, empl_key) %>% 
+  mutate(no_group_estimate = sum(estimate, na.rm = TRUE)) %>% 
+  ungroup() %>% 
+  distinct(GEOID, STATE_COUNTY_FIP, empl_key, no_group_estimate) %>% 
+  pivot_wider(names_from = empl_key, values_from = no_group_estimate) %>% 
+  left_join(population, by=c("GEOID", "STATE_COUNTY_FIP")) %>% 
+  mutate(across(c(Employed_M, Employed_F, Unemployed_M, Unemployed_F, Inactive_M, Inactive_F), 
+                ~ . / Total, 
+                .names = "share_{.col}"),
+         across(matches("share"), ~ ifelse(is.finite(.), ., 0))) %>% 
+  inner_join(group_quart, by="GEOID") %>% 
+  group_by(STATE_COUNTY_FIP) %>% 
+  mutate(STATE_COUNTY_FIP=str_pad(STATE_COUNTY_FIP, width = 5, side = "left", pad = "0")) %>% 
+  ungroup() %>% 
+  inner_join(toxicity_2022, by = c("GEOID" = "GeoID")) %>% 
+  #We remove the 100% inactivity and employment shares. They are most likely jail, airports, industrial facilities, 
+  #that may bias our results 
+  mutate(across(matches("share_"), ~ ifelse(. == 1, NA, .)))
+
+length(unique(empl_stat$GEOID)) #83653
+
+83653/85396 #97.95
+
+write.csv(empl_stat, "in/empl_stat.csv", row.names = FALSE)
+
+### Maps ----
+
+library(readr)
+library(dplyr)
+library(sf)
+library(biscale)
+library(ggplot2)
+library(cowplot)
+
+empl_stat <- read.csv("empl_stat.csv") 
+
+#retrieve geometry at county level. The Maps at tract level where not visible. 
+#We add geometry at county level and we show on the map the counties with at least one tract in the 
+#top distribution of feminization and toxicity 
+
+county_shp <- read_sf("tl_2022_us_county.shp")
+
+county_geom <- county_shp %>% 
+  distinct(GEOID, STATEFP, geometry) %>% 
+  filter(STATEFP %in% unique(states_poll)) %>% 
+  arrange(GEOID)
+
+
+########## INACTIVITY ----
+
+library(biscale)
+
+# 95th-percentile thresholds for inactivity and toxicity
+p95_inactive <- quantile(empl_stat$share_Inactive_F, 0.95, na.rm = TRUE)
+p95_tox      <- quantile(empl_stat$Score_total,       0.95, na.rm = TRUE)
+
+inactive <- bi_class(empl_stat,
+                     x = "share_Inactive_F",
+                     y = "Score_total",
+                     style = "fixed",
+                     dim = 2,
+                     breaks = list(
+                       x = c(-Inf, p95_inactive, Inf),
+                       y = c(-Inf, p95_tox,      Inf)
+                     )) %>%
+  group_by(STATE_COUNTY_FIP) %>%
+  mutate(
+    bi_class = case_when(
+      any(bi_class == "2-2") ~ "2-2",  # top 5% inactivity AND top 5% toxicity
+      any(bi_class == "2-1") ~ "2-1",  # top 5% inactivity only
+      any(bi_class == "1-2") ~ "1-2",  # top 5% toxicity only
+      TRUE ~ NA_character_
+    )
+  ) %>%
+  ungroup() %>%
+  arrange(STATE_COUNTY_FIP) %>%
+  mutate(STATE_COUNTY_FIP = as.character(STATE_COUNTY_FIP)) %>%
+  left_join(county_geom, by = c("STATE_COUNTY_FIP" = "GEOID"))
+
+
+#remove Alaska, Hawai and PuertoRico for visualization purposes. We add them to the federal map
+
+inactive_states <- inactive %>%
+  distinct(STATE_COUNTY_FIP, STATEFP, geometry, bi_class) %>%
+  filter(!(STATEFP %in% c("02", "15", "72")), bi_class == "2-2")
+
+geom_states <- county_geom %>% 
+  filter(!(STATEFP %in% c("02", "15", "72")))
+
+inactive_states <- st_sf(inactive_states)
+geom_states <- st_sf(geom_states)
+
+#CONNECTICUT is missing due to classification. Not a concern for now, also because it's not one of the main territories of interest 
+
+#### (TO CHECK THE COUNTIES TO BE COMMENTED IN OVERLEAF) ----
+
+counties_tox_fem <- inactive %>%
+  distinct(GEOID, STATE_COUNTY_FIP, STATEFP, CountyName, bi_class) %>%
+  filter(bi_class == "2-2")
+
+
+### UNEMPLOYMENT -----
+
+unemployment <- bi_class(empl_stat, 
+                         x = "share_Unemployed_F", 
+                         y = "Score_total",
+                         style = "quantile", 
+                         dim = 4) %>% 
+  group_by(STATE_COUNTY_FIP) %>%
+  mutate(
+    bi_class = case_when(
+      any(bi_class == "4-4") ~ "4-4",
+      any(bi_class == "4-3") ~ "3-4", #case_when has a hierarchy. We prioritize higher toxicity level (3-4) than inactivity (4-3)
+      any(bi_class == "3-4") ~ "4-3",
+      any(bi_class == "3-3") ~ "3-3",
+      
+      TRUE ~ NA_character_
+    ), .groups = "drop"
+  ) %>%
+  arrange(STATE_COUNTY_FIP) %>% 
+  left_join(county_geom, by = c("STATE_COUNTY_FIP" = "GEOID")) 
+
+unemployment_states <- unemployment %>% 
+  distinct(STATE_COUNTY_FIP, STATEFP, geometry, bi_class) %>% 
+  filter(!(STATEFP %in% c("02", "15", "72")), bi_class %in% c("3-3","3-4","4-3","4-4"))
+
+geom_states <- county_geom %>% 
+  filter(!(STATEFP %in% c("02", "15", "72")))
+
+unemployment_states <- st_sf(unemployment_states)
+geom_states <- st_sf(geom_states)
+
+
+### EMPLOYMENT -----
+# lotti new
+# 95th-percentile thresholds (computed at tract level before county aggregation)
+p95_x <- quantile(empl_stat$share_Employed_F, 0.95, na.rm = TRUE)
+p95_y <- quantile(empl_stat$Score_total,       0.95, na.rm = TRUE)
+
+employment <- empl_stat %>%
+  mutate(
+    bi_class = case_when(
+      share_Employed_F >= p95_x & Score_total >= p95_y ~ "2-2",  # top 5% on both
+      share_Employed_F >= p95_x                         ~ "2-1",  # top 5% female employment only
+      Score_total       >= p95_y                         ~ "1-2",  # top 5% toxicity only
+      TRUE                                               ~ "1-1"
+    )
+  ) %>%
+  group_by(STATE_COUNTY_FIP) %>%
+  mutate(
+    bi_class = case_when(
+      any(bi_class == "2-2") ~ "2-2",
+      any(bi_class == "2-1") ~ "2-1",
+      any(bi_class == "1-2") ~ "1-2",
+      TRUE ~ NA_character_
+    )
+  ) %>%
+  ungroup() %>%
+  arrange(STATE_COUNTY_FIP) %>%
+  left_join(county_geom, by = c("STATE_COUNTY_FIP" = "GEOID"))
+
+employment_states <- employment %>%
+  distinct(STATE_COUNTY_FIP, STATEFP, geometry, bi_class) %>%
+  filter(!(STATEFP %in% c("02", "15", "72")), bi_class == "2-2")
+
+geom_states <- county_geom %>% 
+  filter(!(STATEFP %in% c("02", "15", "72")))
+
+employment_states <- st_sf(employment_states)
+geom_states <- st_sf(geom_states)
+
+
+### BY INDUSTRY ----
+
+#We analyse the employment by industry in the toxic and feminized territories. 
+
+industry <- variables_2022 %>% 
+  filter(concept == "Sex by Industry for the Full-Time, Year-Round Civilian Employed Population 16 Years and Over")
+
+var_industry <- as.vector(unique(industry$name))
+
+industry_2022 <- get_acs(geography = "tract",
+                         variables = var_industry,
+                         year= 2022, 
+                         #output = "wide",
+                         geometry = FALSE, 
+                         state=states_poll,
+                         keep_geo_vars = TRUE,
+                         #key = "a151c4ceceb35c7724815204e94a40970f250bb5",
+                         survey = "acs5"
+) 
+
+length(unique(industry_2022$GEOID)) #85396
+
+
+industry <- variables_2022 %>% 
+  distinct(name, label, concept) %>% 
+  inner_join(industry_2022, by=c("name"="variable")) %>% 
+  select(-moe) %>% 
+  mutate(STATE_COUNTY_FIP = substr(GEOID, start=1, stop=5)) %>% 
+  rename("TRACT_COUNTY_STATE_NAME"="NAME")
+
+
+industry_shares <- industry %>% 
+  mutate(naics_3dig=case_when(
+    grepl(":!!Agriculture, forestry, fishing and hunting$", label) ~ "Agriculture",
+    grepl(":!!Mining, quarrying, and oil and gas extraction$", label) ~ "Mining",
+    grepl("Manufacturing", label) ~ "Manufacturing",
+    grepl("Construction", label) ~ "Construction",
+    grepl("Wholesale", label) ~ "Wholesale",
+    grepl("Retail", label) ~ "Retail",
+    grepl(":!!Transportation and warehousing$", label) ~ "Transport_wharehousing",
+    grepl(":!!Utilities$", label) ~ "Utilities",
+    grepl("Information", label) ~ "Information",
+    grepl(":!!Finance and insurance, and real estate, and rental and leasing:$", label) ~ "Finance_ins_realest",
+    grepl(":!!Professional, scientific, and technical services$", label) ~ "Science_techn_serv",
+    grepl(":!!Management of companies and enterprises$", label) ~ "Management_serv",
+    grepl(":!!Administrative and support and waste management services$", label) ~ "Admin_waste",
+    grepl(":!!Educational services$", label) ~ "Education",
+    grepl(":!!Health care and social assistance$", label) ~ "Health_care",
+    grepl(":!!Arts, entertainment, and recreation$", label) ~ "Recreational",
+    grepl(":!!Accommodation and food services$", label) ~ "Accommodation_food",
+    grepl(":!!Other services", label) ~ "Other_serv",
+    grepl(":!!Public administration$", label) ~ "Pub_adm",
+    TRUE~NA_character_),
+    naics_3dig=ifelse(grepl("Male", label), paste0(naics_3dig, "_", "Male"), naics_3dig),
+    naics_3dig=ifelse(grepl("Female", label), paste0(naics_3dig, "_", "Fem"), naics_3dig),
+    naics_3dig=ifelse(label =="Estimate!!Total:", "Empl_Tot", naics_3dig),
+    naics_3dig=ifelse(label =="Estimate!!Total:!!Male:", "Empl_Male", naics_3dig),
+    naics_3dig=ifelse(label =="Estimate!!Total:!!Female:", "Empl_Fem", naics_3dig)) %>% 
+  ungroup() %>% 
+  arrange(GEOID) %>% 
+  filter(!(naics_3dig %in% c("NA_Fem", "NA_Male"))) %>% #specifiche settori a due digits
+  
+  group_by(GEOID, STATE_COUNTY_FIP, naics_3dig) %>% 
+  mutate(estimate_sectors=sum(estimate)) %>% 
+  ungroup() %>% 
+  distinct(GEOID, STATE_COUNTY_FIP, naics_3dig, estimate_sectors) %>% 
+  
+  arrange(GEOID) %>% 
+  pivot_wider(names_from = naics_3dig, values_from = estimate_sectors) %>% 
+  
+  group_by(GEOID) %>% 
+  mutate(across(ends_with("_Fem"), ~ . /Empl_Tot, .names="share_{.col}"),
+         across(ends_with("_Male"), ~ . /Empl_Tot, .names="share_{.col}"),
+         across(ends_with("_Fem"), ~ . /Empl_Fem, .names="share_fem_{.col}"),
+         across(ends_with("_Male"), ~ . /Empl_Male, .names="share_male_{.col}")) %>% 
+  ungroup() %>% 
+  inner_join(toxicity_2022, by=c("GEOID"="GeoID")) %>% 
+  group_by(STATE_COUNTY_FIP) %>% 
+  mutate(STATE_COUNTY_FIP=str_pad(STATE_COUNTY_FIP, width = 5, side = "left", pad = "0")) %>% 
+  ungroup() 
+
+length(unique(industry$STATE_COUNTY_FIP)) #3152
+
+
+write.csv(industry_shares, "industry.csv", row.names = FALSE)
+
+
+##select only the census tracts that have high employment and high toxicity 
+#and compare shares in toxic terriotories and all territories 
+
+empl_tox <- inactive %>% 
+  filter(bi_class %in% c("3-3", "3-4", "4-3", "4-4"))
+
+  industry_empl_tox <- industry_shares %>% 
+  filter(GEOID %in% unique(empl_tox$GEOID)) %>% 
+  distinct(GEOID, STATE_COUNTY_FIP, 
+           share_fem_Health_care_Fem, 
+           share_fem_Education_Fem,
+           share_male_Health_care_Male, 
+           
+           share_male_Education_Male, share_male_Construction_Male, share_fem_Construction_Fem,
+           share_fem_Science_techn_serv_Fem, share_fem_Pub_adm_Fem, share_fem_Admin_waste_Fem,
+           share_fem_Transport_wharehousing_Fem, share_fem_Manufacturing_Fem, share_fem_Utilities_Fem, 
+           share_fem_Mining_Fem,
+           share_male_Science_techn_serv_Male, share_male_Pub_adm_Male, share_male_Admin_waste_Male,
+           share_male_Transport_wharehousing_Male, share_male_Manufacturing_Male, share_male_Utilities_Male, share_male_Mining_Male) %>% 
+  mutate(across(matches("share_"), ~ ifelse(. == 1, NA, .))) %>% 
+  na.omit()
+
+
+
+summary(industry_empl_tox)
+
+summary_industry <- industry_shares %>% 
+  distinct(GEOID, STATE_COUNTY_FIP, share_Empl_Fem, share_Empl_Male, share_fem_Health_care_Fem, share_fem_Education_Fem,
+           share_fem_Health_care_Fem, 
+           share_fem_Education_Fem,
+           share_male_Health_care_Male, share_male_Education_Male, share_male_Construction_Male, share_fem_Construction_Fem,
+           share_fem_Science_techn_serv_Fem, share_fem_Pub_adm_Fem, share_fem_Admin_waste_Fem,
+           share_fem_Transport_wharehousing_Fem, share_fem_Manufacturing_Fem, share_fem_Utilities_Fem, 
+           share_fem_Mining_Fem,
+           share_male_Science_techn_serv_Male, share_male_Pub_adm_Male, share_male_Admin_waste_Male,
+           share_male_Transport_wharehousing_Male, share_male_Manufacturing_Male, share_male_Utilities_Male, share_male_Mining_Male) %>% 
+  mutate(across(matches("share_"), ~ ifelse(. == 1, NA, .))) %>% 
+  na.omit()
+
+summary(summary_industry)
+
+summary(empl_stat)
+
+
+# 1. Calculate Means for Toxic Group
+toxic_long <- industry_empl_tox %>%
+  summarise(across(starts_with("share_"), \(x) mean(x, na.rm = TRUE))) %>%
+  pivot_longer(cols = everything(), names_to = "variable", values_to = "Toxic_Value")
+
+# 2. Calculate Means for National Group
+national_long <- summary_industry %>%
+  summarise(across(starts_with("share_"), \(x) mean(x, na.rm = TRUE))) %>%
+  pivot_longer(cols = everything(), names_to = "variable", values_to = "National_Value")
+
+# 3. Merge, Clean, and Split Gender/Sector
+comparison_df <- left_join(toxic_long, national_long, by = "variable") %>%
+  mutate(
+    # Identify Gender based on the variable suffix or prefix
+    Gender = case_when(
+      grepl("_Male$|_male_", variable) ~ "Male",
+      grepl("_Fem$|_fem_", variable) ~ "Female",
+      TRUE ~ "Other"
+    ),
+    # Cleaning Sector names: 
+    # This regex removes 'share_fem_', 'share_male_', '_Fem', and '_Male'
+    Sector = gsub("^share_(fem_|male_)|(_Fem|_Male)$", "", variable),
+    # Replace remaining underscores with spaces for readability
+    Sector = gsub("_", " ", Sector),
+    # Capitalize first letter for professional look
+    Sector = trimws(Sector)
+  ) %>%
+  # Remove total employment shares if they exist in your list
+  filter(!Sector %in% c("Empl", "Empl Fem", "Empl Male"))
+
+
+## MEAN USUAL HOURS WORKED -----
+###Dataset ----
+mean_hours <- variables_2022 %>% 
+  filter(grepl("Mean Usual Hours Worked in the Past 12 Months for Workers 16 to 64 Years", concept))
+
+
+var_mean_hours <- as.vector(unique(mean_hours$name))
+
+mean_hours_2022 <- get_acs(geography = "tract",
+                           variables = var_mean_hours,
+                           year= 2022, 
+                           #output = "wide",
+                           geometry = FALSE, 
+                           state=states_poll,
+                           keep_geo_vars = TRUE,
+                           #key = "a151c4ceceb35c7724815204e94a40970f250bb5",
+                           survey = "acs5"
+) 
+
+length(unique(mean_hours_2022$GEOID)) #85396
+
+
+mean_hours <- variables_2022 %>% 
+  distinct(name, label, concept) %>% 
+  inner_join(mean_hours_2022, by=c("name"="variable")) %>% 
+  select(-moe) %>% 
+  mutate(STATE_COUNTY_FIP = substr(GEOID, start=1, stop=5)) %>% 
+  rename("TRACT_COUNTY_STATE_NAME"="NAME") %>% 
+  mutate(share=case_when(grepl("Male", label) ~ "Male",
+                         grepl("Female", label) ~ "Female",
+                         TRUE ~ "Total"
+  )) %>% 
+  arrange(GEOID) %>% 
+  distinct(GEOID, STATE_COUNTY_FIP, share, estimate) %>% 
+  pivot_wider(names_from = "share", 
+              values_from = "estimate") %>% 
+  
+  inner_join(toxicity_2022, by=c("GEOID"="GeoID")) %>% 
+  group_by(STATE_COUNTY_FIP) %>% 
+  mutate(STATE_COUNTY_FIP=str_pad(STATE_COUNTY_FIP, width = 5, side = "left", pad = "0")) %>% 
+  ungroup() %>% 
+  mutate(Female_inv = Female * -1) #I want the relationship to be toxicity with respect to low levels of hours worked
+
+
+write.csv(mean_hours, "mean_hours.csv", row.names = FALSE)
+
+
+
+#INTRA HOUSEHOLD ----
+
+### Dataset ----
+intra_house <- variables_2022 %>% 
+  filter(grepl("Subfamily Type by Presence of Own Children|Marital Status by Sex by Labor Force Participation|Sex by Educational Attainment for the Population 25 Years and Over", concept))
+
+
+var_intra_house <- as.vector(unique(intra_house$name))
+
+intra_house_2022 <- get_acs(geography = "tract",
+                            variables = var_intra_house,
+                            year= 2022, 
+                            #output = "wide",
+                            geometry = FALSE, 
+                            state=states_poll,
+                            keep_geo_vars = TRUE,
+                            #key = "a151c4ceceb35c7724815204e94a40970f250bb5",
+                            survey = "acs5"
+) 
+
+intra_household <- variables_2022 %>% 
+  distinct(name, label, concept) %>% 
+  inner_join(intra_house_2022, by=c("name"="variable")) %>% 
+  mutate(STATE_COUNTY_FIP = substr(GEOID, start=1, stop=5)) %>% 
+  rename("TRACT_COUNTY_STATE_NAME"="NAME") %>% 
+  arrange(GEOID)
+
+
+unique(intra_household$label)
+
+unique(intra_household$concept)
+
+family_type <- intra_household %>% 
+  filter(concept == "Subfamily Type by Presence of Own Children Under 18 Years") %>% 
+  mutate(
+    fam_child = case_when(
+      label == "Estimate!!Total:" ~ "Total",
+      label == "Estimate!!Total:!!Married-couple subfamily:" ~ "Tot_Married",
+      label == "Estimate!!Total:!!Married-couple subfamily:!!With own children under 18 years" ~ "Married_child",
+      label == "Estimate!!Total:!!Married-couple subfamily:!!No own children under 18 years" ~ "Married_no_child",
+      label == "Estimate!!Total:!!Father-child subfamily" ~ "Male_child",
+      label == "Estimate!!Total:!!Mother-child subfamily" ~ "Female_child")) %>% 
+  distinct(GEOID, STATE_COUNTY_FIP, fam_child, estimate) %>% 
+  pivot_wider(names_from = fam_child, values_from = estimate) %>%
+  mutate(across(c(Married_child, Married_no_child, Female_child, Male_child), ~ . / Total, .names = "share_{.col}"),
+         across(matches("share"), ~ replace(., !is.finite(.),0)))
+
+marital_status_labour <- intra_household %>% 
+  filter(concept == "Marital Status by Sex by Labor Force Participation",
+         !(label %in% c("Estimate!!Total:!!Never married:",                                                                       
+                        "Estimate!!Total:!!Never married:!!Male:",
+                        "Estimate!!Total:!!Never married:!!Female:",
+                        "Estimate!!Total:!!Now married (except separated):",
+                        "Estimate!!Total:!!Now married (except separated):!!Male:",
+                        "Estimate!!Total:!!Now married (except separated):!!Female:",
+                        "Estimate!!Total:!!Separated:",                                                                          
+                        "Estimate!!Total:!!Separated:!!Male:",
+                        "Estimate!!Total:!!Separated:!!Female:",
+                        "Estimate!!Total:!!Widowed:",
+                        "Estimate!!Total:!!Widowed:!!Male:",
+                        "Estimate!!Total:!!Widowed:!!Female:",
+                        "Estimate!!Total:!!Divorced:",
+                        "Estimate!!Total:!!Divorced:!!Male:",
+                        "Estimate!!Total:!!Divorced:!!Female:")),
+         !(grepl("In labor force:$", label))) %>% 
+  mutate(mar_empl_stat = case_when(
+    label=="Estimate!!Total:" ~ "Total",
+    grepl("Never married", label) ~ "Nev_marr",
+    grepl("Now married", label) ~ "Marr",
+    grepl("Separated", label) ~ "Not_marr",
+    grepl("Divorced", label) ~ "Not_marr",
+    grepl("Widowed", label) ~ "Not_marr"),
+    mar_empl_stat = ifelse(grepl("Employed", label), paste0(mar_empl_stat, "_","empl"), mar_empl_stat),
+    mar_empl_stat = ifelse(grepl("Unemployed", label), paste0(mar_empl_stat, "_", "unempl"), mar_empl_stat),
+    mar_empl_stat = ifelse(grepl("Not in labor force", label), paste0(mar_empl_stat, "_", "inactive"), mar_empl_stat),
+    mar_empl_stat = ifelse(grepl("Male", label), paste0(mar_empl_stat,"_" ,"M"), mar_empl_stat),
+    mar_empl_stat = ifelse(grepl("Female", label), paste0(mar_empl_stat, "_" ,"F"), mar_empl_stat)) %>% 
+  select(GEOID, STATE_COUNTY_FIP, mar_empl_stat, estimate) %>% 
+  group_by(GEOID, mar_empl_stat) %>% 
+  mutate(estimate_mar = sum(estimate)) %>% 
+  ungroup() %>% 
+  distinct(GEOID, STATE_COUNTY_FIP, mar_empl_stat, estimate_mar) %>% 
+  pivot_wider(names_from = mar_empl_stat, values_from = estimate_mar) %>% 
+  group_by(GEOID) %>% 
+  mutate(Total_Fem= sum(across(matches("_F$")), na.rm = TRUE),
+         Total_Male= sum(across(matches("_M$")), na.rm = TRUE),
+         across(matches("_F$"), ~ . / Total_Fem, .names = "share_{.col}"),
+         across(matches("_M$"), ~ . / Total_Male, .names = "share_{.col}"),
+         Total=sum(Total_Fem, Total_Male),
+         across(matches("_F$"), ~ . / Total, .names = "share_tot_{.col}"),
+         across(matches("_M$"), ~ . / Total, .names = "share_tot_{.col}"),
+  ) %>% 
+  ungroup() %>% 
+  arrange(GEOID)
+
+
+education <- intra_household %>% 
+  filter(grepl("Sex by Educational Attainment for the Population 25 Years and Over", concept),
+         concept != "Median Earnings in the Past 12 Months (in 2022 Inflation-Adjusted Dollars) by Sex by Educational Attainment for the Population 25 Years and Over") %>% 
+  mutate(school_range=case_when(
+    grepl("Bachelor|college", label) ~ "college",
+    grepl("Less|High school", label) ~ "no_college",
+    label == "Estimate!!Total!!Female" ~ "Tot_Female",
+    label == "Estimate!!Total!!Male" ~ "Tot_Male",
+    TRUE ~ "Total"),
+    school_range=ifelse(grepl("Male", label), paste0(school_range, "_", "M"), school_range),
+    school_range=ifelse(grepl("Female", label), paste0(school_range, "_", "F"), school_range)) %>% 
+  group_by(GEOID, school_range) %>% 
+  mutate(estimate_school = sum(estimate)) %>% 
+  ungroup() %>% 
+  
+  distinct(GEOID, STATE_COUNTY_FIP,school_range, estimate_school) %>% 
+  pivot_wider(names_from = school_range, values_from = estimate_school) %>% 
+  
+  mutate(across(c(college_F, no_college_F), ~ . / Total_F, .names = "share_{.col}"),
+         across(c(college_M, no_college_M), ~ . / Total_M, .names = "share_{.col}"),
+         across(c(college_F, no_college_F, college_M, no_college_M), ~ . / Total, .names="share_tot_{.col}")) %>% 
+  arrange(GEOID) 
+
+
+
+## FULL DATASET -------
+
+#empl_stat
+#industry_shares
+#earnings
+#mean_hours
+#intra_household
+
+library(purrr)
+library(dplyr)
+
+## NEEDED TO REMOVE DUPLICATE COLUMNS USED BEFORE
+
+empl_stat <- empl_stat %>% 
+  rename(#"Total_16_64_workforce"="Total",
+    "group_quarters"="estimate") %>% 
+  select(-NAME, -moe, -variable)
+
+education <- education %>% 
+  rename("Total_edu"="Total",
+         "Total_edu_M"="Total_M",
+         "Total_edu_F"="Total_F")
+
+marital_labor <- marital_status_labour %>% 
+  rename("Total_mar"="Total",
+         "Total_mar_M"="Total_Male",
+         "Total_mar_F"="Total_Fem")
+
+
+industry_shares <- industry_shares %>% 
+  select(-c("County_fips",                                 
+            "State_fips",
+            "Pop",                                         
+            "NumFacs",
+            "NumReleases",                                 
+            "NumChems",
+            "CancToxConc_mean",
+            "NonCancToxConc_mean",
+            "ToxConc_mean",                               
+            "Score_total",
+            "CancToxConc_total",
+            "NonCancToxConc_total",
+            "ToxConc_total",                               
+            "TOTAL_AREA_SQMI",
+            "ToxConc_per_capita",
+            "Score_per_sqmi",
+            "CountyName"))
+
+earnings <- earnings %>% 
+  rename("Earnings_Male"="Male",
+         "Earnings_Female"="Female") %>% 
+  select(-c("County_fips",                                 
+            "State_fips",
+            "Pop",                                         
+            "NumFacs",
+            "NumReleases",                                 
+            "NumChems",
+            "CancToxConc_mean",
+            "NonCancToxConc_mean",
+            "ToxConc_mean",                               
+            "Score_total",
+            "CancToxConc_total",
+            "NonCancToxConc_total",
+            "ToxConc_total",                               
+            "TOTAL_AREA_SQMI",
+            "ToxConc_per_capita",
+            "Score_per_sqmi",
+            "CountyName"))
+
+family_type <- family_type %>% 
+  rename("Total_family"="Total")
+
+mean_hours <- mean_hours %>% 
+  rename("Total_mean_hours"="Total",
+         "Female_mean_hours"="Female",
+         "Male_mean_hours"="Male",
+  ) %>% 
+  select(-c("County_fips",                                 
+            "State_fips",
+            "Pop",                                         
+            "NumFacs",
+            "NumReleases",                                 
+            "NumChems",
+            "CancToxConc_mean",
+            "NonCancToxConc_mean",
+            "ToxConc_mean",                               
+            "Score_total",
+            "CancToxConc_total",
+            "NonCancToxConc_total",
+            "ToxConc_total",                               
+            "TOTAL_AREA_SQMI",
+            "ToxConc_per_capita",
+            "Score_per_sqmi",
+            "CountyName"))
+
+# Put all datasets into a list
+list_of_dfs <- list(
+  empl_stat, 
+  industry_shares, 
+  earnings, 
+  mean_hours, 
+  education, 
+  marital_labor, 
+  family_type
+)
+
+# Merge them all using left_join
+acs_2022 <- list_of_dfs %>% 
+  reduce(left_join, by = c("GEOID", "STATE_COUNTY_FIP"))
+
+write.csv(acs_2022, "acs_2022.csv", row.names = FALSE)
+# note: this is where linnea does the merge. use this for analysis
+```
+
